@@ -1,0 +1,2562 @@
+From 80a1672cf57a166beefaa13c9df0da2fe3343067 Mon Sep 17 00:00:00 2001
+From: deLiseLINO <52623978+deLiseLINO@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 02:43:11 +0300
+Subject: [PATCH] feat(android): run on Android 12
+
+Lower minSdk from 33 to 31. Every API 33 call that lint reported is now behind an SDK_INT check, with a working fallback below 33: Canvas versions of the AGSL visuals (agent activity orb, voice scope and orb, onboarding signal field, connection scope, reveal glow, Catch Up drift), androidx BackHandler instead of OnBackInvokedDispatcher, pre-33 equivalents for dictation support checks, geocoding, package info, vibration, URL coding and stream reads. The app language row is hidden below 33 because Android 12 has no per-app languages.
+
+Verified: lintDebug and testDebugUnitTest pass for every module; on an API 31 emulator the app connects to an OpenCode v2 server, runs an agent turn and shows the activity orb, connection scope and settings.
+---
+ .../src/main/kotlin/OpenCodePlugins.kt        |   2 +-
+ docs/parity/settings.md                       |   6 +-
+ .../opencode/feature/composer/AgentPicker.kt  |  20 +-
+ .../feature/composer/ComposerFileImport.kt    |  13 +-
+ .../feature/composer/DictationClient.kt       |  18 +-
+ .../feature/composer/SharedLocation.kt        |  36 ++-
+ .../drawer/catchup/CatchUpDriftField.kt       | 119 ++++++--
+ .../feature/media/MediaPresentation.kt        | 110 +++++--
+ .../feature/session/ComposerQuoteViews.kt     |  13 +
+ .../session/agentactivity/AgentActivityOrb.kt | 103 ++++++-
+ .../agentactivity/AgentActivityShaders.kt     |   6 +-
+ .../feature/settings/AppLanguageClient.kt     |  21 +-
+ .../opencode/feature/settings/AppVersion.kt   |   8 +-
+ .../opencode/feature/settings/SettingsView.kt |  10 +-
+ .../settings/connection/ConnectionScope.kt    | 146 +++++++--
+ .../connection/ConnectionScopeShaders.kt      |   4 +-
+ .../settings/onboarding/SignalField.kt        | 272 +++++++++++++++--
+ .../opencode/feature/system/SystemAction.kt   |   2 +-
+ .../system/intents/SystemSearchIndex.kt       |   2 +-
+ .../feature/transcript/list/TranscriptList.kt |  16 +-
+ .../transcript/user/AgentMessageReveal.kt     |  88 +++++-
+ .../transcript/user/TranscriptUserBubble.kt   |  24 +-
+ .../ai/opencode/feature/voice/DotScopeView.kt | 284 +++++++++++++++---
+ .../opencode/feature/voice/LivingOrbView.kt   | 272 ++++++++++++++---
+ .../feature/voice/VoiceHapticEngine.kt        |  15 +-
+ 25 files changed, 1354 insertions(+), 256 deletions(-)
+
+diff --git a/build-logic/src/main/kotlin/OpenCodePlugins.kt b/build-logic/src/main/kotlin/OpenCodePlugins.kt
+index 6ac886cb..019a043f 100644
+--- a/build-logic/src/main/kotlin/OpenCodePlugins.kt
++++ b/build-logic/src/main/kotlin/OpenCodePlugins.kt
+@@ -15,7 +15,7 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinAndroidProjectExtension
+ object OpenCodeBuild {
+     const val COMPILE_SDK = 37
+     const val COMPILE_SDK_MINOR = 1
+-    const val MIN_SDK = 33
++    const val MIN_SDK = 31
+     const val TARGET_SDK = 37
+ }
+ 
+diff --git a/docs/parity/settings.md b/docs/parity/settings.md
+index a1b23c14..fc3321f9 100644
+--- a/docs/parity/settings.md
++++ b/docs/parity/settings.md
+@@ -11,7 +11,7 @@ Status values: `todo`, `partial: <what is missing>`, `done`, `n/a: <reason and w
+ | `OpenCode/Settings/ConnectionHealth.swift` | 404 | `feature/settings/.../connection/ConnectionHealth.kt` | done | incl. `BeatShape`, `ConnectionTrace`, `ServerCardName`; the number is the rolling average of the last 3 answers, the opening number averaging in (840f7c89). Android divergence (QA A-08): `ServerCardName.machineName(fromReverse:)` also rejects a first label that is all digits or holds four dash-separated octets (`ip-10-0-2-2`, `ec2-3-89-50-194`, `c-73-12-34-56`), and saved names are re-checked, so an unnamed IP server reads its friendly name (“Server 2”) as in the list and drawer; iOS keeps such labels (upstream note filed) |
+ | `OpenCode/Settings/ConnectionMonitor.swift` | 456 | `feature/settings/.../connection/ConnectionMonitor.kt` | done | last averaged round trip per server (840f7c89); single-shot `GET /api/info` probe (4 s, retry `.once`, `ServerContact` noted), machine names under `connection-card-machine-names`. `ConnectionLabScenario` n/a: no lab launch arguments on Android; fixture servers drive the states Sync 3f473f75 (f261300b): one check out at a time; a beat while the last is still out sends nothing (tailscale/tailscale#21773). Sync 3cea48b2 (9c94975e): the live check probes `ServerLinkClient.resolve(server)`. Sync 03adf07a (a87677a5, 09b3ac03): n/a: the iOS changes animate its published values (swap/layout) and build it once; Android's monitor has no animation and is remembered once. |
+ | `OpenCode/Settings/ConnectionScope.swift` | 305 | `feature/settings/.../connection/ConnectionScope.kt` | done | Canvas + AGSL at 30 fps, paused when not resumed; reduce motion draws a still trace |
+-| `OpenCode/Settings/ConnectionScopeShaders.metal` | 66 | `feature/settings/.../connection/ConnectionScopeShaders.kt` | done | AGSL `RuntimeShader` |
++| `OpenCode/Settings/ConnectionScopeShaders.metal` | 66 | `feature/settings/.../connection/ConnectionScopeShaders.kt` | done | AGSL `RuntimeShader` (API 33+); Android 12 draws the same dots as Canvas circles from the same field (no halo) |
+ | `OpenCode/Settings/Experimental/AllExperiments.swift` | 84 | `core/.../sharing/AllExperiments.kt`, `feature/settings/.../HomeSettingsFeature.kt` (`AllExperimentsChanged`, `ExperimentalFeatureApplied`) | done | New (e1f2f810, p217). Same keys (`experimental-all`, `experimental-all-skip-<raw>`, `experimental-all-saved-<raw>` as `Boolean?`); `joiningAll`, `switchAllOn`, `restoreFromAll` (removes the saved value, as iOS's nil does), `adoptNewExperimentsIntoAll` as companion extensions. `HomeSettingsFeature` shares one `experimentalFeatureApplied` helper (Server Voice check, Sound Effects preload) between a hand switch and every switch All changes; a hand switch while All is on records or clears its skip. |
+ | `OpenCode/Settings/Experimental/ExperimentalFeature.swift` | 80 | `core/.../sharing/ExperimentalFeature.kt` | done | Android: no summaries (rows are titles only). Android copy: “Background Call Shortcut” for iOS’s “Background Action Button Call” (no Action button; App Actions shortcut); “Session Live Updates” / “Follow runs in a live notification” for “Session Live Activity” / “Follow runs on the Lock Screen”. iOS's registered struct is a Kotlin enum (`group`, `order`, `defaultEnabled`, `isGraduated`; `allCases` sorted by order then raw value; `fromRawValue` only finds listed cases). Lab overrides n/a (no launch environment). Retired entries (`sinceYouLeft`, `sessionSwitcher`, `serverTitleSwitch`) stay `@Deprecated`, unlisted and never on, until the session/drawer ports drop their readers. `floatingCall` is gone (iOS 64ff3ed7): `FloatingCallCenter.isOn` reads Living Orb's switch and Home/Session pass it, and a saved Floating Call switch moves to Living Orb at launch (`migrateFloatingCall`) Sync orb-default: `isOnByDefault` is `defaultEnabled`; the DEBUG `OPENCODE_LAB_EXPERIMENTS_OFF` lab switch is n/a (no XCUITest lab). Sync b1c67259 (e1f2f810): `joinsAll` (constructor flag, default true; false once graduated or retired). Sync e5c22780: `defaultEnabled` gone (every experiment starts off). Sync dccec82e (ac9fcd2b): one table as iOS: `order` and `isGraduated` are gone (the enum is in display order), `summary` is optional (no subtitle when it restated the title: hideModels, voiceSessionDelegator, inboxSidebar, inAppBrowser), `group` is nullable (welcomePreview has none) and only grouped rows join All Experiments; openLinksFromCalls, audioInCalls and serverDetails are removed. Sync 440b77f0 (f956e020): `serverVoice` case removed. Sync 03adf07a (d0b24aaa): `ExperimentalFeature.onePicker` deleted (One Picker graduated); "one-picker" joins the retired keys. Android-only: `serverAddressLinks` (“Open Links by Server Address”, drawer group) lets a link name its server by address. Android differs on purpose: no `agentSelection` experiment; it is a setting in Sessions, and `agent-selection` is in the retired list. |
+ | `OpenCode/Settings/ExperimentalFeatures.swift` | 97 | `core/.../sharing/ExperimentalFeature.kt` (`experimental(f)`, `ExperimentalFeatures`, `retiredKeys`/`removeRetiredSwitches`), `core/.../experiments/ExperimentalFeatures.kt` (`key`, `ExperimentalGroup`, `migrateCallStyles` and its keys, `migrateModelPicker`) | done | moved down to `:core` (every feature reads it). Migrations take a `SharedStore` (iOS `UserDefaults`; `SharedStore.contains/remove` added for them). `OPENCODE_LAB_EXPERIMENTS` lab overrides n/a (no launch environment on Android); Sync orb-default (iOS e1da9389..ad33c3a7): `ExperimentalCallStyle.defaultStyle`; `migrateToLivingOrbDefault` (`call-style-migrated-orb-default`, once; a Tray in use stays) replaces `migrateFloatingCall`, run by `migrateBeforeLaunch()`. iOS `OPENCODE_LAB_EXPERIMENTS_OFF` is n/a. Sync b1c67259 (iOS 569e6f30, p217): the graduated four's keys join `retiredKeys` (removed at launch). Sync b1c67259 (0fbb99f8): `ModelPickerStyle` and its key deleted; `ExperimentalFeature.migrateModelPicker` (`LEGACY_MODEL_PICKER_KEY`, `legacyModelPickerSwitchKeys`) turns One Picker on once for a saved style other than Today or either old switch, then removes the keys; the app runs it before `removeRetiredSwitches`. Sync b1c67259 (ea61212b): `ExperimentalCallStyle`, `isCallStyle` and `ExperimentalGroup.toggles` are gone; `ExperimentalFeature.migrateCallStyles` (companion extensions with the legacy Floating Call/Tray keys, `call-style-migrated-living-orb` once, the Nov 1 marker) puts Tray users and installs from before Nov 1 on Living Orb, keeps a switch saved after it, and removes the legacy keys. Sync b1c67259 (e1f2f810): the All Experiments keys and functions live in `core/.../sharing/AllExperiments.kt`. Sync e5c22780: `retiredKeys` adds the Living Orb/Image Link Previews/New Messages Divider switches, their All Experiments marks and the call-style migration markers; `migrateCallStyles` deleted. Sync dccec82e (ac9fcd2b): `retiredKeys` adds open-links-from-calls, audio-in-calls and server-details (switch, all-skip and all-saved keys), cleared at launch; groups run composer, calls, drawer, transcript. Sync 440b77f0 (f956e020): "server-voice" joins the retired keys, so a saved switch is cleared at launch. Sync 03adf07a (d0b24aaa): `migrateModelPicker` and its legacy keys are gone; the old model-picker switches ("experimental-model-picker", "-new-model-picker", "-custom-model-picker") are retired keys instead. |
+@@ -23,7 +23,7 @@ Status values: `todo`, `partial: <what is missing>`, `done`, `n/a: <reason and w
+ | `OpenCode/Settings/Onboarding/OnboardingPlaygroundFeature.swift` | 372 | `feature/settings/.../onboarding/OnboardingPlaygroundFeature.kt` | done | + `OnboardingCameraClient` |
+ | `OpenCode/Settings/Onboarding/OnboardingPlaygroundView.swift` | 602 | `feature/settings/.../onboarding/OnboardingPlaygroundView.kt` | done | the live camera feed is out of every screenshot (`HidesFromScreenshots`, 0ef53b54); “OpenCode on iPhone” → “OpenCode on Android”; `OnboardingSkeleton` splits the free height between the blocks above and below the centre as iOS's two `maxHeight: .infinity` frames, gives a block that needs more its height and scrolls when nothing fits (no clipped subtitle at large text); the shared aperture follows the active page's centre slot and the field waits for its first bounds |
+ | `OpenCode/Settings/Onboarding/SignalField.swift` | 357 | `feature/settings/.../onboarding/SignalField.kt` | done | Tunables baked to iOS defaults; no slow-motion time scale |
+-| `OpenCode/Settings/Onboarding/SignalFieldShaders.metal` | 101 | `feature/settings/.../onboarding/SignalFieldShaders.kt` | done | AGSL `RuntimeShader` |
++| `OpenCode/Settings/Onboarding/SignalFieldShaders.metal` | 101 | `feature/settings/.../onboarding/SignalFieldShaders.kt` | done | AGSL `RuntimeShader` (API 33+); Android 12 evaluates the same field on the CPU (`SignalFieldRenderer.drawDots`, binned `drawPoints`, no halo) |
+ | `OpenCode/Settings/Onboarding/WelcomeBrowser.swift` | 333 | `feature/settings/.../onboarding/WelcomeBrowser.kt` | done | `WelcomeSitePage` (the dark OpenCode site, 330 × 206: rails, wordmark grid, hero, install card, the Download for Android button growing with its sheen), `WelcomeWordmark`, `WelcomeBrowserWindow` (toolbar, reload bar cooling, shot flash and recede, the `BrowserPage` target), `WelcomeScreenshot` (`opencode.png`; drawn live at the tile, no bitmap render). Not checked on an emulator. Android-only divergence: the button reads Download for Android (the story is about this app). |
+ | `OpenCode/Settings/Onboarding/WelcomeCarriers.swift` | 269 | `feature/settings/.../onboarding/WelcomeCarriers.kt` | done | The pearl (press bloom and ring, tapered comet ribbon, velocity-aligned head, bubble ripple; framework `Paint` + `BlurMaskFilter`) and the screenshot carrier lifting off the browser onto the phone’s tile; `along` (1 − (1 − u)^2.4) and the quadratic `arc`. Targets are px in the scene, measured with `onGloballyPositioned` (iOS anchor preferences). Not checked on an emulator. |
+ | `OpenCode/Settings/Onboarding/WelcomeDesktop.swift` | 396 | `feature/settings/.../onboarding/WelcomeDesktop.kt` | done | The desktop app at 720 × 450: title bar (working dots, New session → title), session header, the column (prompt bubble, Explored, Browser, Edit +6 −1, Screenshot, streamed reply, Ship it, git push) with its top fade, composer (placeholder swap, Big Pickle, Send ↔ Stop), the browser window, and Settings › Pairing with its dialog and code, cross-faded by pairing. Icons without a Material Symbol use the nearest mapped one (`chevron.backward` for `arrow.left`, `paintpalette` for `circle.lefthalf.filled`, `laptopcomputer.and.iphone` for `ipad.and.iphone`). Not checked on an emulator. |
+@@ -245,7 +245,7 @@ Status values: `todo`, `partial: <what is missing>`, `done`, `n/a: <reason and w
+ 
+ Also here: `HomeSettingsFeature.kt` (iOS `Drawer/HomeSettingsFeature.swift`, moved down; see drawer.md): every action but `developerModeChanged`/`motionWatchChanged`/`touchProbeChanged`/`voiceDemoModeChanged` (iOS sends them from `DiagnosticsView`; Android's `:devtools` `DevToolsFeature` owns Developer Mode and Demo Call Audio, Motion Watch and Touch Probe are iOS-only) and the Tuning mirrors of `plusMenuSheet`/`composerAutocomplete` (the composer reads the keys). Synced to iOS f657969b: Sound Effects volume/send and `prepare` on enabling (b275ccb6), `welcomeOpened` (7f411b1c), Orb Style gone (e4aeb212); `voiceDelegatorChoiceChanged`, `callSoundPackSelected`, `voiceModelsLoaded(asked:)` and the delegator's session list wait on voice (see the SettingsView row). Settings-owned Android extras: `SettingsPresentation.kt` is the overlay Home wraps itself in.
+ 
+-Android-only: Settings › Language (`LanguageSettingsView.kt`, `AppLanguageClient.kt`, `HomeSettingsFeature.AppLanguageChanged`) sets the app's language through Android's per-app language setting (`LocaleManager`), listing the languages in the generated `LocaleConfig` with a search field and a Suggested group of the phone's languages, as Android's App language screen does; iOS has no language setting.
++Android-only: Settings › Language (`LanguageSettingsView.kt`, `AppLanguageClient.kt`, `HomeSettingsFeature.AppLanguageChanged`) sets the app's language through Android's per-app language setting (`LocaleManager`), listing the languages in the generated `LocaleConfig` with a search field and a Suggested group of the phone's languages, as Android's App language screen does; iOS has no language setting. Android 12 has no per-app language, so `AppLanguageClient.isAvailable` is false there and Settings hides the row.
+ 
+ ## Tests
+ 
+diff --git a/feature/composer/src/main/kotlin/ai/opencode/feature/composer/AgentPicker.kt b/feature/composer/src/main/kotlin/ai/opencode/feature/composer/AgentPicker.kt
+index de25f3ca..ece95945 100644
+--- a/feature/composer/src/main/kotlin/ai/opencode/feature/composer/AgentPicker.kt
++++ b/feature/composer/src/main/kotlin/ai/opencode/feature/composer/AgentPicker.kt
+@@ -15,9 +15,13 @@ import ai.opencode.feature.composer.modelpicker.OnePickerChipRoll
+ import ai.opencode.feature.composer.plusmenu.findActivity
+ import ai.opencode.server.model.AgentDisplayName
+ import ai.opencode.server.model.OpenCodeAutocompleteAgent
++import android.app.Activity
++import android.os.Build
+ import android.os.SystemClock
+ import android.window.OnBackInvokedCallback
+ import android.window.OnBackInvokedDispatcher
++import androidx.activity.compose.BackHandler
++import androidx.annotation.RequiresApi
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+@@ -224,16 +228,26 @@ private fun AgentMenuRow(
+ // The menu's popup doesn't take focus, so back goes to the activity; overlay priority runs it before the keyboard's.
+ @Composable
+ private fun AgentMenuBackHandler(enabled: Boolean, onBack: () -> Unit) {
++    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
++        BackHandler(enabled, onBack)
++        return
++    }
+     val activity = LocalContext.current.findActivity() ?: return
+     val currentOnBack by rememberUpdatedState(onBack)
+     DisposableEffect(activity, enabled) {
+         if (!enabled) return@DisposableEffect onDispose { }
+-        val callback = OnBackInvokedCallback { currentOnBack() }
+-        activity.onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_OVERLAY, callback)
+-        onDispose { activity.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback) }
++        val unregister = registerOverlayBack(activity) { currentOnBack() }
++        onDispose { unregister() }
+     }
+ }
+ 
++@RequiresApi(Build.VERSION_CODES.TIRAMISU)
++private fun registerOverlayBack(activity: Activity, onBack: () -> Unit): () -> Unit {
++    val callback = OnBackInvokedCallback { onBack() }
++    activity.onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_OVERLAY, callback)
++    return { activity.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback) }
++}
++
+ /**
+  * Settings › Composer › Default Agent, the agent new sessions start with, only while Agent
+  * Selection is on. Reads [AgentPickerSharedKeys.defaultAgentID] and
+diff --git a/feature/composer/src/main/kotlin/ai/opencode/feature/composer/ComposerFileImport.kt b/feature/composer/src/main/kotlin/ai/opencode/feature/composer/ComposerFileImport.kt
+index 37761163..2382986c 100644
+--- a/feature/composer/src/main/kotlin/ai/opencode/feature/composer/ComposerFileImport.kt
++++ b/feature/composer/src/main/kotlin/ai/opencode/feature/composer/ComposerFileImport.kt
+@@ -140,7 +140,7 @@ object ComposerUriStaging {
+             throw error
+         }
+         val declared = resolver.getType(source)?.takeIf { it != "application/octet-stream" }
+-        val head = runCatching { destination.inputStream().use { it.readNBytes(4096) } }.getOrDefault(ByteArray(0))
++        val head = runCatching { destination.inputStream().use { it.readHead(4096) } }.getOrDefault(ByteArray(0))
+         return ComposerStagedFile(
+             id = id,
+             name = fileName,
+@@ -151,6 +151,17 @@ object ComposerUriStaging {
+     }
+ }
+ 
++private fun java.io.InputStream.readHead(limit: Int): ByteArray {
++    val buffer = ByteArray(limit)
++    var count = 0
++    while (count < limit) {
++        val read = read(buffer, count, limit - count)
++        if (read < 0) break
++        count += read
++    }
++    return if (count == limit) buffer else buffer.copyOf(count)
++}
++
+ /**
+  * The system pickers behind the + menu's Files and Photos. Activity results need an Activity, so
+  * the screen launches these intents and routes the result [uris].
+diff --git a/feature/composer/src/main/kotlin/ai/opencode/feature/composer/DictationClient.kt b/feature/composer/src/main/kotlin/ai/opencode/feature/composer/DictationClient.kt
+index 561f4258..71900acb 100644
+--- a/feature/composer/src/main/kotlin/ai/opencode/feature/composer/DictationClient.kt
++++ b/feature/composer/src/main/kotlin/ai/opencode/feature/composer/DictationClient.kt
+@@ -451,6 +451,17 @@ private class SpeechSetup(private val context: Context) {
+         val onDevice = withContext(Dispatchers.Main) { SpeechRecognizer.isOnDeviceRecognitionAvailable(context) }
+         val available = withContext(Dispatchers.Main) { SpeechRecognizer.isRecognitionAvailable(context) }
+         if (!onDevice && !available) throw DictationError.LocaleUnsupported()
++        val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            checkedLanguage(onDevice, available, install)
++        } else {
++            Language(bestLocale(null), onDevice = !available, isInstallFallback = false)
++        }
++        resolved = result
++        result
++    }
++
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
++    private suspend fun checkedLanguage(onDevice: Boolean, available: Boolean, install: Boolean): Language {
+         val support = withTimeoutOrNull(INSTALL_WAIT) { support(onDevice) }
+         val supported = when {
+             support == null -> null
+@@ -466,12 +477,11 @@ private class SpeechSetup(private val context: Context) {
+             install(language) ?: awaitInstalled(language)
+         } == true
+         if (!installed && !available) throw DictationError.LocaleUnsupported()
+-        val result = Language(language, onDevice = installed && onDevice, isInstallFallback = !installed)
+-        resolved = result
+-        result
++        return Language(language, onDevice = installed && onDevice, isInstallFallback = !installed)
+     }
+ 
+     /** What the recognizer supports, or nil when it can't say (dictation then tries the current language). */
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+     private suspend fun support(onDevice: Boolean): RecognitionSupport? = withContext(Dispatchers.Main) {
+         val recognizer = if (onDevice) SpeechRecognizer.createOnDeviceSpeechRecognizer(context) else SpeechRecognizer.createSpeechRecognizer(context)
+         try {
+@@ -496,6 +506,7 @@ private class SpeechSetup(private val context: Context) {
+     }
+ 
+     /** Downloads the on-device model for [language]: true installed, null scheduled, false when it won't be there. */
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+     private suspend fun install(language: String): Boolean? = withContext(Dispatchers.Main) {
+         val recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+@@ -518,6 +529,7 @@ private class SpeechSetup(private val context: Context) {
+      * request and this polling by [INSTALL_WAIT]. False if no longer pending (declined or failed)
+      * after [INSTALL_GRACE].
+      */
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+     private suspend fun awaitInstalled(language: String): Boolean {
+         val started = SystemClock.uptimeMillis()
+         while (true) {
+diff --git a/feature/composer/src/main/kotlin/ai/opencode/feature/composer/SharedLocation.kt b/feature/composer/src/main/kotlin/ai/opencode/feature/composer/SharedLocation.kt
+index bca0d353..7f2da96b 100644
+--- a/feature/composer/src/main/kotlin/ai/opencode/feature/composer/SharedLocation.kt
++++ b/feature/composer/src/main/kotlin/ai/opencode/feature/composer/SharedLocation.kt
+@@ -31,7 +31,9 @@ import android.location.LocationListener
+ import android.location.LocationManager
+ import android.location.LocationRequest
+ import android.net.Uri
++import android.os.Build
+ import android.provider.Settings
++import androidx.annotation.RequiresApi
+ import androidx.annotation.StringRes
+ import androidx.compose.animation.AnimatedVisibility
+ import androidx.compose.animation.core.Animatable
+@@ -420,22 +422,32 @@ private object LiveLocation {
+     private suspend fun reverseGeocode(context: Context, fix: Location): Address? {
+         if (!Geocoder.isPresent()) return null
+         return withTimeoutOrNull(geocodeTimeout) {
+-            suspendCancellableCoroutine { continuation ->
+-                runCatching {
+-                    Geocoder(context).getFromLocation(fix.latitude, fix.longitude, 1, object : Geocoder.GeocodeListener {
+-                        override fun onGeocode(addresses: MutableList<Address>) {
+-                            if (continuation.isActive) continuation.resume(addresses.firstOrNull())
+-                        }
+-
+-                        override fun onError(errorMessage: String?) {
+-                            if (continuation.isActive) continuation.resume(null)
+-                        }
+-                    })
+-                }.onFailure { if (continuation.isActive) continuation.resume(null) }
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++                geocodeAsync(context, fix)
++            } else {
++                withContext(Dispatchers.IO) {
++                    @Suppress("DEPRECATION")
++                    runCatching { Geocoder(context).getFromLocation(fix.latitude, fix.longitude, 1)?.firstOrNull() }.getOrNull()
++                }
+             }
+         }
+     }
+ 
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
++    private suspend fun geocodeAsync(context: Context, fix: Location): Address? = suspendCancellableCoroutine { continuation ->
++        runCatching {
++            Geocoder(context).getFromLocation(fix.latitude, fix.longitude, 1, object : Geocoder.GeocodeListener {
++                override fun onGeocode(addresses: MutableList<Address>) {
++                    if (continuation.isActive) continuation.resume(addresses.firstOrNull())
++                }
++
++                override fun onError(errorMessage: String?) {
++                    if (continuation.isActive) continuation.resume(null)
++                }
++            })
++        }.onFailure { if (continuation.isActive) continuation.resume(null) }
++    }
++
+     /** One line without the country (MapKit `fullAddress(includingRegion: false, singleLine: true)`). */
+     private fun fullAddress(item: Address): String? {
+         val street = listOfNotNull(item.subThoroughfare, item.thoroughfare).joinToString(" ").ifEmpty { null }
+diff --git a/feature/drawer/src/main/kotlin/ai/opencode/feature/drawer/catchup/CatchUpDriftField.kt b/feature/drawer/src/main/kotlin/ai/opencode/feature/drawer/catchup/CatchUpDriftField.kt
+index 5bd87fd1..bc401592 100644
+--- a/feature/drawer/src/main/kotlin/ai/opencode/feature/drawer/catchup/CatchUpDriftField.kt
++++ b/feature/drawer/src/main/kotlin/ai/opencode/feature/drawer/catchup/CatchUpDriftField.kt
+@@ -3,7 +3,9 @@ package ai.opencode.feature.drawer.catchup
+ import ai.opencode.core.motion.rememberReduceMotion
+ import ai.opencode.core.ui.OpenCodeTheme
+ import android.graphics.RuntimeShader
++import android.os.Build
+ import android.view.accessibility.AccessibilityManager
++import androidx.annotation.RequiresApi
+ import androidx.compose.foundation.Canvas
+ import androidx.compose.foundation.layout.WindowInsets
+ import androidx.compose.foundation.layout.displayCutout
+@@ -19,22 +21,29 @@ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.setValue
+ import androidx.compose.runtime.withFrameNanos
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.ShaderBrush
++import androidx.compose.ui.graphics.drawscope.DrawScope
++import androidx.compose.ui.graphics.lerp
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.semantics.clearAndSetSemantics
+ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.compose.LocalLifecycleOwner
+ import androidx.lifecycle.compose.currentStateAsState
++import kotlin.math.PI
+ import kotlin.math.floor
+ import kotlin.math.max
+ import kotlin.math.min
++import kotlin.math.sin
+ 
+ /**
+  * The calm dot-matrix Drift field behind the Catch Up stack that blooms as the last card goes, an
+- * AGSL [RuntimeShader]. Reduce Motion holds one still frame; the field pauses while the screen
+- * isn't resumed. Draw it edge to edge: the stage centre comes from the system-bar and cutout insets
+- * plus the header and footer.
++ * AGSL [RuntimeShader] on Android 13+ and a soft palette aura below. Reduce Motion holds one still
++ * frame; the field pauses while the screen isn't resumed. Draw it edge to edge: the stage centre
++ * comes from the system-bar and cutout insets plus the header and footer.
+  */
+ @Composable
+ fun CatchUpDriftFieldView(isFinished: Boolean, modifier: Modifier = Modifier) {
+@@ -69,7 +78,7 @@ fun CatchUpDriftFieldView(isFinished: Boolean, modifier: Modifier = Modifier) {
+ 
+     Canvas(modifier.clearAndSetSemantics {}) {
+         val scale = density.density
+-        val shader = renderer.update(
++        val look = renderer.update(
+             widthPx = size.width,
+             heightPx = size.height,
+             scale = scale,
+@@ -81,10 +90,36 @@ fun CatchUpDriftFieldView(isFinished: Boolean, modifier: Modifier = Modifier) {
+             safeTopPx = safeTop.toFloat(),
+             safeBottomPx = safeBottom.toFloat(),
+         ) ?: return@Canvas
+-        drawRect(ShaderBrush(shader))
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            drawRect(ShaderBrush(renderer.shader().apply(look)))
++        } else {
++            drawDriftGlow(look)
++        }
+     }
+ }
+ 
++/** The field without the dot matrix: the palette's aura at the stage centre, at the shader's level, swell and breath. */
++private fun DrawScope.drawDriftGlow(look: CatchUpDriftLook) {
++    val palette = look.palette
++    val you = Color(palette[0], palette[1], palette[2])
++    val agent = Color(palette[6], palette[7], palette[8])
++    val breath = 0.5f + 0.5f * sin(2f * PI.toFloat() * look.time / 3.8f)
++    val base = (if (look.isDark) 0.022f else 0.032f) + (if (look.isDark) 0.1f else 0.12f) * look.level
++    val pulse = look.swell * (0.55f + 0.45f * breath)
++    val ratio = (0.35f + 0.33f * min(1f, pulse * 0.8f)).coerceIn(0f, 1f)
++    val tint = lerp(agent, you, ratio)
++    val centre = Offset(look.centreXPt * look.scale, look.centreYPt * look.scale)
++    drawRect(tint, alpha = base * 0.5f)
++    drawRect(
++        Brush.radialGradient(
++            0f to tint.copy(alpha = (base + 0.24f * pulse * look.level).coerceIn(0f, 1f)),
++            1f to tint.copy(alpha = 0f),
++            center = centre,
++            radius = 2.2f * 195f * look.scale,
++        ),
++    )
++}
++
+ private const val FRAME_SLACK_SECONDS = 0.002
+ 
+ 
+@@ -102,9 +137,31 @@ internal fun rememberTouchExplorationEnabled(): Boolean {
+     }
+     return enabled
+ }
+-/** Owns the shader and its uniforms. */
++/** One frame's inputs to the field. */
++internal class CatchUpDriftLook(
++    val scale: Float,
++    val pitchPx: Float,
++    val cols: Float,
++    val rows: Float,
++    val originXPx: Float,
++    val originYPx: Float,
++    val heightPx: Float,
++    val isDark: Boolean,
++    val time: Float,
++    val level: Float,
++    val swell: Float,
++    val finishTime: Float,
++    val centreXPt: Float,
++    val centreYPt: Float,
++    val palette: FloatArray,
++)
++
++/** Owns the field's clock and, on Android 13+, its shader. */
+ internal class CatchUpDriftRenderer {
+-    private val shader = RuntimeShader(SHADER)
++    private var shader: CatchUpDriftShader? = null
++
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
++    fun shader(): CatchUpDriftShader = shader ?: CatchUpDriftShader().also { shader = it }
+     private val startTime = clock()
+ 
+     fun update(
+@@ -118,7 +175,7 @@ internal class CatchUpDriftRenderer {
+         isDark: Boolean,
+         safeTopPx: Float,
+         safeBottomPx: Float,
+-    ): RuntimeShader? {
++    ): CatchUpDriftLook? {
+         if (widthPx < 1 || heightPx < 1 || scale <= 0) return null
+         val widthPt = widthPx / scale
+         val heightPt = heightPx / scale
+@@ -152,19 +209,41 @@ internal class CatchUpDriftRenderer {
+ 
+         val stageTop = safeTopPx / scale + CatchUpMetrics.headerHeight.value
+         val stageBottom = heightPt - (safeBottomPx / scale + CatchUpMetrics.footerHeight.value)
+-        val centreX = widthPt * 0.5f
+-        val centreY = (stageTop + stageBottom) * 0.5f
++        return CatchUpDriftLook(
++            scale = scale,
++            pitchPx = PITCH_PT * scale,
++            cols = cols,
++            rows = rows,
++            originXPx = originXPt * scale,
++            originYPx = originYPt * scale,
++            heightPx = heightPx,
++            isDark = isDark,
++            time = time,
++            level = level,
++            swell = swell,
++            finishTime = finishTime,
++            centreXPt = widthPt * 0.5f,
++            centreYPt = (stageTop + stageBottom) * 0.5f,
++            palette = if (isDark) DARK else LIGHT,
++        )
++    }
++
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
++    internal class CatchUpDriftShader {
++        private val shader = RuntimeShader(SHADER)
+ 
+-        val palette = if (isDark) DARK else LIGHT
+-        shader.setFloatUniform("grid", PITCH_PT * scale, cols, rows, scale)
+-        shader.setFloatUniform("origin", originXPt * scale, originYPt * scale, heightPx, if (isDark) 1f else 0f)
+-        shader.setFloatUniform("look", time, level, swell, finishTime)
+-        shader.setFloatUniform("centre", centreX, centreY, 82f, 42f)
+-        shader.setFloatUniform("you", palette[0], palette[1], palette[2], 1f)
+-        shader.setFloatUniform("youCore", palette[3], palette[4], palette[5], 1f)
+-        shader.setFloatUniform("agent", palette[6], palette[7], palette[8], 1f)
+-        shader.setFloatUniform("agentCore", palette[9], palette[10], palette[11], 1f)
+-        return shader
++        fun apply(look: CatchUpDriftLook): RuntimeShader {
++            val palette = look.palette
++            shader.setFloatUniform("grid", look.pitchPx, look.cols, look.rows, look.scale)
++            shader.setFloatUniform("origin", look.originXPx, look.originYPx, look.heightPx, if (look.isDark) 1f else 0f)
++            shader.setFloatUniform("look", look.time, look.level, look.swell, look.finishTime)
++            shader.setFloatUniform("centre", look.centreXPt, look.centreYPt, 82f, 42f)
++            shader.setFloatUniform("you", palette[0], palette[1], palette[2], 1f)
++            shader.setFloatUniform("youCore", palette[3], palette[4], palette[5], 1f)
++            shader.setFloatUniform("agent", palette[6], palette[7], palette[8], 1f)
++            shader.setFloatUniform("agentCore", palette[9], palette[10], palette[11], 1f)
++            return shader
++        }
+     }
+ 
+     companion object {
+diff --git a/feature/media/src/main/kotlin/ai/opencode/feature/media/MediaPresentation.kt b/feature/media/src/main/kotlin/ai/opencode/feature/media/MediaPresentation.kt
+index fc8b3d6b..dea0b4b9 100644
+--- a/feature/media/src/main/kotlin/ai/opencode/feature/media/MediaPresentation.kt
++++ b/feature/media/src/main/kotlin/ai/opencode/feature/media/MediaPresentation.kt
+@@ -19,6 +19,8 @@ import android.window.BackEvent
+ import android.window.OnBackAnimationCallback
+ import android.window.OnBackInvokedCallback
+ import android.window.OnBackInvokedDispatcher
++import androidx.activity.compose.BackHandler
++import androidx.annotation.RequiresApi
+ import androidx.compose.animation.core.animate
+ import androidx.compose.animation.core.tween
+ import androidx.compose.foundation.Canvas
+@@ -1556,18 +1558,82 @@ private fun StatusBarEffect(controller: MediaViewerController) {
+  */
+ @Composable
+ internal fun MediaBackHandler(enabled: Boolean, onBack: () -> Unit) {
++    PlatformBackHandler(enabled, PlatformBackPriority.Overlay, onBack)
++}
++
++/** Where a [PlatformBackHandler] sits among the activity's back handlers on Android 13+. */
++enum class PlatformBackPriority { Default, AboveDefault, Overlay }
++
++/**
++ * Back through the platform's back dispatcher at [priority] on Android 13+; below that through
++ * the activity's `OnBackPressedDispatcher`, where the handler registered last wins.
++ */
++@Composable
++fun PlatformBackHandler(enabled: Boolean, priority: PlatformBackPriority, onBack: () -> Unit) {
++    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
++        BackHandler(enabled) { onBack() }
++        return
++    }
+     val activity = LocalContext.current.findActivity() ?: return
+     val currentOnBack by rememberUpdatedState(onBack)
+-    DisposableEffect(activity, enabled) {
++    DisposableEffect(activity, enabled, priority) {
+         if (!enabled) return@DisposableEffect onDispose { }
+-        val callback = OnBackInvokedCallback { currentOnBack() }
+-        activity.onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_OVERLAY, callback)
+-        onDispose { activity.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback) }
++        val registration = BackInvokedRegistration.registerAction(activity, priority.dispatcherPriority()) { currentOnBack() }
++        onDispose { registration() }
++    }
++}
++
++@RequiresApi(Build.VERSION_CODES.TIRAMISU)
++private fun PlatformBackPriority.dispatcherPriority(): Int = when (this) {
++    PlatformBackPriority.Default -> OnBackInvokedDispatcher.PRIORITY_DEFAULT
++    PlatformBackPriority.AboveDefault -> OnBackInvokedDispatcher.PRIORITY_DEFAULT + 1
++    PlatformBackPriority.Overlay -> OnBackInvokedDispatcher.PRIORITY_OVERLAY
++}
++
++@RequiresApi(Build.VERSION_CODES.TIRAMISU)
++private object BackInvokedRegistration {
++    /** Registers [callback]; returns its unregistration. */
++    fun register(activity: Activity, priority: Int, callback: OnBackInvokedCallback): () -> Unit {
++        activity.onBackInvokedDispatcher.registerOnBackInvokedCallback(priority, callback)
++        return { activity.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback) }
++    }
++
++    fun registerAction(activity: Activity, priority: Int, onBack: () -> Unit): () -> Unit =
++        register(activity, priority, OnBackInvokedCallback { onBack() })
++
++    fun registerAnimated(
++        activity: Activity,
++        onStarted: () -> Unit,
++        onProgressed: (progress: Float, fromRightEdge: Boolean) -> Unit,
++        onCancelled: () -> Unit,
++        onInvoked: () -> Unit,
++    ): () -> Unit {
++        // Android 13 reports no gesture progress to apps, so back there only dismisses.
++        val callback = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
++            OnBackInvokedCallback { onInvoked() }
++        } else object : OnBackAnimationCallback {
++            override fun onBackStarted(backEvent: BackEvent) {
++                onStarted()
++            }
++
++            override fun onBackProgressed(backEvent: BackEvent) {
++                onProgressed(backEvent.progress, backEvent.swipeEdge == BackEvent.EDGE_RIGHT)
++            }
++
++            override fun onBackCancelled() {
++                onCancelled()
++            }
++
++            override fun onBackInvoked() {
++                onInvoked()
++            }
++        }
++        return register(activity, OnBackInvokedDispatcher.PRIORITY_OVERLAY, callback)
+     }
+ }
+ 
+ /**
+- * [MediaBackHandler] that also hears the back gesture's progress (Android only), so the viewer
++ * [MediaBackHandler] that also hears the back gesture's progress (Android 14+), so the viewer
+  * previews its dismissal while the swipe is held. A button or TalkBack back calls only
+  * [onInvoked].
+  */
+@@ -1579,6 +1645,10 @@ internal fun MediaPredictiveBackHandler(
+     onCancelled: () -> Unit,
+     onInvoked: () -> Unit,
+ ) {
++    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
++        BackHandler(enabled) { onInvoked() }
++        return
++    }
+     val activity = LocalContext.current.findActivity() ?: return
+     val currentOnStarted by rememberUpdatedState(onStarted)
+     val currentOnProgressed by rememberUpdatedState(onProgressed)
+@@ -1586,28 +1656,14 @@ internal fun MediaPredictiveBackHandler(
+     val currentOnInvoked by rememberUpdatedState(onInvoked)
+     DisposableEffect(activity, enabled) {
+         if (!enabled) return@DisposableEffect onDispose { }
+-        // Android 13 reports no gesture progress to apps, so back there only dismisses.
+-        val callback = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+-            OnBackInvokedCallback { currentOnInvoked() }
+-        } else object : OnBackAnimationCallback {
+-            override fun onBackStarted(backEvent: BackEvent) {
+-                currentOnStarted()
+-            }
+-
+-            override fun onBackProgressed(backEvent: BackEvent) {
+-                currentOnProgressed(backEvent.progress, backEvent.swipeEdge == BackEvent.EDGE_RIGHT)
+-            }
+-
+-            override fun onBackCancelled() {
+-                currentOnCancelled()
+-            }
+-
+-            override fun onBackInvoked() {
+-                currentOnInvoked()
+-            }
+-        }
+-        activity.onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_OVERLAY, callback)
+-        onDispose { activity.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback) }
++        val registration = BackInvokedRegistration.registerAnimated(
++            activity,
++            onStarted = { currentOnStarted() },
++            onProgressed = { progress, fromRightEdge -> currentOnProgressed(progress, fromRightEdge) },
++            onCancelled = { currentOnCancelled() },
++            onInvoked = { currentOnInvoked() },
++        )
++        onDispose { registration() }
+     }
+ }
+ 
+diff --git a/feature/session/src/main/kotlin/ai/opencode/feature/session/ComposerQuoteViews.kt b/feature/session/src/main/kotlin/ai/opencode/feature/session/ComposerQuoteViews.kt
+index e47bb2bd..24e12241 100644
+--- a/feature/session/src/main/kotlin/ai/opencode/feature/session/ComposerQuoteViews.kt
++++ b/feature/session/src/main/kotlin/ai/opencode/feature/session/ComposerQuoteViews.kt
+@@ -21,8 +21,11 @@ import ai.opencode.feature.transcript.R as TranscriptR
+ import android.app.Activity
+ import android.content.Context
+ import android.content.ContextWrapper
++import android.os.Build
+ import android.window.OnBackInvokedCallback
+ import android.window.OnBackInvokedDispatcher
++import androidx.activity.compose.BackHandler
++import androidx.annotation.RequiresApi
+ import androidx.compose.animation.AnimatedVisibility
+ import androidx.compose.animation.core.MutableTransitionState
+ import androidx.compose.animation.fadeIn
+@@ -293,6 +296,16 @@ private fun CommentField(field: TextFieldState, saved: String, onSave: () -> Uni
+ // In the composer's window the keys hear back first; overlay priority takes it before them.
+ @Composable
+ private fun CommentPanelBackHandler(enabled: Boolean, onBack: () -> Unit) {
++    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++        OverlayBackInvokedHandler(enabled, onBack)
++    } else {
++        BackHandler(enabled = enabled, onBack = onBack)
++    }
++}
++
++@RequiresApi(Build.VERSION_CODES.TIRAMISU)
++@Composable
++private fun OverlayBackInvokedHandler(enabled: Boolean, onBack: () -> Unit) {
+     val activity = LocalContext.current.findActivity() ?: return
+     val currentOnBack by rememberUpdatedState(onBack)
+     DisposableEffect(activity, enabled) {
+diff --git a/feature/session/src/main/kotlin/ai/opencode/feature/session/agentactivity/AgentActivityOrb.kt b/feature/session/src/main/kotlin/ai/opencode/feature/session/agentactivity/AgentActivityOrb.kt
+index 690a0b2e..4cf9aed7 100644
+--- a/feature/session/src/main/kotlin/ai/opencode/feature/session/agentactivity/AgentActivityOrb.kt
++++ b/feature/session/src/main/kotlin/ai/opencode/feature/session/agentactivity/AgentActivityOrb.kt
+@@ -1,17 +1,25 @@
+ package ai.opencode.feature.session.agentactivity
+ 
++import android.os.Build
++import androidx.annotation.RequiresApi
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.drawscope.DrawScope
+ import androidx.compose.ui.graphics.drawscope.translate
+ import androidx.compose.ui.graphics.nativeCanvas
+ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
++import kotlin.math.exp
+ import kotlin.math.floor
+ import kotlin.math.max
+ import kotlin.math.min
++import kotlin.math.pow
+ import kotlin.math.roundToInt
+ 
+ /**
+  * Draws the orb: its soft radial glow, then each dot with its white-hot core and a faint halo, in
+- * one GPU pass via [AgentActivityShaders.orbShader].
++ * one GPU pass via [AgentActivityShaders.orbShader] on API 33+, and with Canvas gradients and
++ * circles from the same packed uniforms below it.
+  */
+ object AgentActivityOrb {
+     /** The glow's spill past the layout box, in the box's own unit. */
+@@ -201,6 +209,17 @@ object AgentActivityOrb {
+         val m = margin(sizeDp) * density
+         val side = box + 2 * m
+         val packed = pack(field, cells, area = side, size = sizeDp, density = density, dark = dark, out = scratch)
++        translate((size.width - box) / 2 - m, (size.height - box) / 2 - m) {
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++                drawShaded(packed, side)
++            } else {
++                drawCircles(packed)
++            }
++        }
++    }
++
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
++    private fun DrawScope.drawShaded(packed: Packed, side: Float) {
+         val shader = AgentActivityShaders.orbShader
+         shader.setFloatUniform("header0", packed.header0)
+         shader.setFloatUniform("header1", packed.header1)
+@@ -210,9 +229,87 @@ object AgentActivityOrb {
+         shader.setFloatUniform("accent", packed.accent)
+         shader.setFloatUniform("accentCore", packed.accentCore)
+         shader.setFloatUniform("cells", packed.cells)
+-        translate((size.width - box) / 2 - m, (size.height - box) / 2 - m) {
+-            drawIntoCanvas { it.nativeCanvas.drawRect(0f, 0f, side, side, AgentActivityShaders.orbPaint) }
++        drawIntoCanvas { it.nativeCanvas.drawRect(0f, 0f, side, side, AgentActivityShaders.orbPaint) }
++    }
++
++    private const val GLOW_STOPS = 6
++    private const val HALO_STOPS = 4
++
++    /** [AgentActivityShaders.ACTIVITY_ORB_FIELD]'s maths, drawn as gradients and discs. */
++    private fun DrawScope.drawCircles(p: Packed) {
++        val ox = p.header0[0]
++        val oy = p.header0[1]
++        val pitch = p.header0[2]
++        val glowAmount = p.header1[0]
++        val glowPeak = p.header1[1]
++        val isDark = p.header1[2] > 0.5f
++        val a0 = p.header1[3]
++        val centre = Offset(ox + 3.5f * pitch, oy + 3.5f * pitch)
++
++        if (glowAmount > 1e-3f) {
++            val sigma = 2.2f
++            val reach = 3.6f * sigma
++            val stops = Array(GLOW_STOPS) { k ->
++                val t = k / (GLOW_STOPS - 1f)
++                val d = t * reach
++                val g = min(1f, glowAmount * exp(-d * d / (2f * sigma * sigma))) * glowPeak
++                t to color(p.glowRGB[0], p.glowRGB[1], p.glowRGB[2], g)
++            }
++            drawCircle(Brush.radialGradient(*stops, center = centre, radius = reach * pitch), radius = reach * pitch, center = centre)
+         }
++
++        val top = if (isDark) 0.96f else 1f
++        for (i in 0 until 49) {
++            val b = i * 4
++            val dotSize = p.cells[b + 3]
++            if (dotSize <= 0f) continue
++            val dotCenter = Offset(ox + (i % 7 + 0.5f) * pitch, oy + (i / 7 + 0.5f) * pitch)
++            val light = p.cells[b].coerceIn(0f, 1f)
++            val fresh = p.cells[b + 1].coerceIn(0f, 1f)
++            val dotAccent = p.cells[b + 2].coerceIn(0f, 1f)
++            val haloPeak = 0.22f * light * light
++
++            val shrink = 1f + ((0.82f + 0.18f * fresh) - 1f) * smoothstep(0.03f, 0.2f, light)
++            val radius = (0.25f + 0.17f * max(light, 1e-5f).pow(0.6f)) * shrink * pitch * dotSize
++            val expPow = (if (isDark) 0.9f else 0.75f) * (1.4f + (1f - 1.4f) * fresh)
++            val dotAlpha = a0 + (top - a0) * max(light, 1e-5f).pow(expPow)
++            val core = (light * light * 1.1f).coerceIn(0f, 0.9f) * (0.3f + 0.7f * fresh)
++            val r = mixChannel(p, 0, core, dotAccent)
++            val g = mixChannel(p, 1, core, dotAccent)
++            val bl = mixChannel(p, 2, core, dotAccent)
++
++            if (haloPeak > 0.008f) {
++                val outer = radius + 0.5f * pitch
++                val inner = max(0f, radius - 0.01f * outer)
++                val stops = Array(HALO_STOPS + 2) { k ->
++                    when (k) {
++                        0 -> 0f to Color.Transparent
++                        1 -> inner / outer to color(r, g, bl, 0f)
++                        else -> {
++                            val t = (k - 2) / (HALO_STOPS - 1f)
++                            val dist = radius + t * (outer - radius)
++                            dist / outer to color(r, g, bl, haloPeak * exp(-(dist - radius) / (0.12f * pitch)))
++                        }
++                    }
++                }
++                drawCircle(Brush.radialGradient(*stops, center = dotCenter, radius = outer), radius = outer, center = dotCenter)
++            }
++            drawCircle(color(r, g, bl, dotAlpha), radius = radius, center = dotCenter)
++        }
++    }
++
++    private fun mixChannel(p: Packed, c: Int, core: Float, dotAccent: Float): Float {
++        val n = p.neutral[c] + (p.neutralCore[c] - p.neutral[c]) * core
++        val a = p.accent[c] + (p.accentCore[c] - p.accent[c]) * core
++        return n + (a - n) * dotAccent
++    }
++
++    private fun color(r: Float, g: Float, b: Float, a: Float) =
++        Color(r.coerceIn(0f, 1f), g.coerceIn(0f, 1f), b.coerceIn(0f, 1f), a.coerceIn(0f, 1f))
++
++    private fun smoothstep(e0: Float, e1: Float, x: Float): Float {
++        val t = ((x - e0) / (e1 - e0)).coerceIn(0f, 1f)
++        return t * t * (3f - 2f * t)
+     }
+ }
+ 
+diff --git a/feature/session/src/main/kotlin/ai/opencode/feature/session/agentactivity/AgentActivityShaders.kt b/feature/session/src/main/kotlin/ai/opencode/feature/session/agentactivity/AgentActivityShaders.kt
+index c839c46a..918c34f0 100644
+--- a/feature/session/src/main/kotlin/ai/opencode/feature/session/agentactivity/AgentActivityShaders.kt
++++ b/feature/session/src/main/kotlin/ai/opencode/feature/session/agentactivity/AgentActivityShaders.kt
+@@ -2,6 +2,8 @@ package ai.opencode.feature.session.agentactivity
+ 
+ import android.graphics.Paint
+ import android.graphics.RuntimeShader
++import android.os.Build
++import androidx.annotation.RequiresApi
+ 
+ /**
+  * Single-pass analytical fragment shader for [AgentActivityOrb] (the activity glyph and the shell
+@@ -14,7 +16,8 @@ import android.graphics.RuntimeShader
+  * cells in the same row-major order and skips any farther than a pitch, which composites the same
+  * cells in the same order.
+  *
+- * minSdk is 33, so `RuntimeShader` (API 33) is always available and no Canvas fallback is needed.
++ * `RuntimeShader` needs API 33; below it [AgentActivityOrb] paints the same packed dots with Canvas
++ * circles instead.
+  *
+  * Uniforms:
+  * - `header0`: originX, originY, pitch, scale
+@@ -22,6 +25,7 @@ import android.graphics.RuntimeShader
+  * - `glowRGB`, `neutral`, `neutralCore`, `accent`, `accentCore`
+  * - `cells[49]`: (light, fresh, accent, dotSize); dotSize 0 marks a cell outside the disc mask.
+  */
++@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+ object AgentActivityShaders {
+     const val ACTIVITY_ORB_FIELD = """
+ uniform float4 header0;
+diff --git a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/AppLanguageClient.kt b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/AppLanguageClient.kt
+index 9b7f13fb..c36d85b2 100644
+--- a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/AppLanguageClient.kt
++++ b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/AppLanguageClient.kt
+@@ -5,16 +5,21 @@ import ai.opencode.core.dependencies.DependencyKey
+ import ai.opencode.core.dependencies.dependency
+ import android.app.LocaleConfig
+ import android.app.LocaleManager
++import android.content.Context
+ import android.icu.util.ULocale
++import android.os.Build
+ import android.os.LocaleList
++import androidx.annotation.RequiresApi
+ import java.text.Normalizer
+ import java.util.Locale
+ 
+ /**
+  * The app's own language, through Android's per-app language setting, so Settings › Apps › OpenCode ›
+- * Language shows the same choice.
++ * Language shows the same choice. Unavailable before Android 13, which has no per-app language.
+  */
+ class AppLanguageClient(
++    /** False hides Settings › Language. */
++    val isAvailable: Boolean = true,
+     /** The languages the app is translated into, from its generated locale config. */
+     val supported: () -> List<Locale> = { emptyList() },
+     /** The app's language, or null when it follows the system. */
+@@ -26,9 +31,18 @@ class AppLanguageClient(
+ ) {
+     companion object Key : DependencyKey<AppLanguageClient> {
+         override val liveValue: AppLanguageClient by lazy {
+-            val context = dependency(AppContext)
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++                perAppLanguage(dependency(AppContext))
++            } else {
++                AppLanguageClient(isAvailable = false, systemLocales = { listOf(Locale.getDefault()) })
++            }
++        }
++        override val testValue: AppLanguageClient = AppLanguageClient()
++
++        @RequiresApi(Build.VERSION_CODES.TIRAMISU)
++        private fun perAppLanguage(context: Context): AppLanguageClient {
+             val manager = context.getSystemService(LocaleManager::class.java)
+-            AppLanguageClient(
++            return AppLanguageClient(
+                 supported = {
+                     val locales = LocaleConfig(context).supportedLocales
+                     val list = mutableListOf<Locale>()
+@@ -53,7 +67,6 @@ class AppLanguageClient(
+                 },
+             )
+         }
+-        override val testValue: AppLanguageClient = AppLanguageClient()
+     }
+ }
+ 
+diff --git a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/AppVersion.kt b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/AppVersion.kt
+index 89932cd4..f0e30d57 100644
+--- a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/AppVersion.kt
++++ b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/AppVersion.kt
+@@ -4,6 +4,7 @@ import ai.opencode.core.dependencies.AppContext
+ import ai.opencode.core.dependencies.dependency
+ import ai.opencode.core.strings.localized
+ import android.content.pm.PackageManager
++import android.os.Build
+ 
+ /**
+  * What's running, “Version 0.2.3 (226) · ec7d822”. Android reads the package's version name and
+@@ -25,7 +26,12 @@ data class AppVersion(val version: String, val build: String, val commit: String
+         private fun read(): AppVersion = runCatching {
+             val context = dependency(AppContext)
+             val pm = context.packageManager
+-            val info = pm.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(PackageManager.GET_META_DATA.toLong()))
++            val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++                pm.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(PackageManager.GET_META_DATA.toLong()))
++            } else {
++                @Suppress("DEPRECATION")
++                pm.getPackageInfo(context.packageName, PackageManager.GET_META_DATA)
++            }
+             val commit = info.applicationInfo?.metaData?.getString("opencode.commit")?.takeIf { it.isNotEmpty() }
+             AppVersion(info.versionName ?: "?", info.longVersionCode.toString(), commit)
+         }.getOrElse { AppVersion("?", "?", null) }
+diff --git a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/SettingsView.kt b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/SettingsView.kt
+index 87f4639d..fb072f5c 100644
+--- a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/SettingsView.kt
++++ b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/SettingsView.kt
+@@ -1,6 +1,7 @@
+ package ai.opencode.feature.settings
+ 
+ import ai.opencode.core.R as CoreR
++import ai.opencode.core.dependencies.dependency
+ import ai.opencode.core.experiments.ExperimentalFeature
+ import ai.opencode.core.experiments.key
+ import ai.opencode.core.motion.MotionPhase
+@@ -276,6 +277,7 @@ private fun SettingsRootPage(store: SettingsStore) {
+     val voiceModeEnabled by remember { shared(SharedKeys.voiceModeEnabled).flow }.collectAsState()
+     val developerMode by remember { shared(SharedKeys.developerMode).flow }.collectAsState()
+     val hideModels by remember { shared(ExperimentalFeature.hideModels.key).flow }.collectAsState()
++    val languageAvailable = remember { dependency(AppLanguageClient).isAvailable }
+     val notificationPermission by store.observe { it.notificationPermission }
+     val returnFocus = rememberSettingsReturnFocus(store, page = null)
+     val push = { page: SettingsPage ->
+@@ -299,10 +301,12 @@ private fun SettingsRootPage(store: SettingsStore) {
+                     push(SettingsPage.Appearance)
+                 }
+                 SettingsDivider(inset = true)
+-                SettingsRow(stringResource(R.string.settings_language_title), "globe", SettingsTint.Blue, modifier = returnFocus.on(SettingsPage.Language)) {
+-                    push(SettingsPage.Language)
++                if (languageAvailable) {
++                    SettingsRow(stringResource(R.string.settings_language_title), "globe", SettingsTint.Blue, modifier = returnFocus.on(SettingsPage.Language)) {
++                        push(SettingsPage.Language)
++                    }
++                    SettingsDivider(inset = true)
+                 }
+-                SettingsDivider(inset = true)
+                 SettingsRow(stringResource(R.string.settings_sessions_title), "bubble.left.fill", SettingsTint.Blue, modifier = returnFocus.on(SettingsPage.Sessions)) { push(SettingsPage.Sessions) }
+                 if (ExperimentalFeature.hideModels.isActive(hideModels)) {
+                     SettingsDivider(inset = true)
+diff --git a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/connection/ConnectionScope.kt b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/connection/ConnectionScope.kt
+index ccc511f5..ed6027a1 100644
+--- a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/connection/ConnectionScope.kt
++++ b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/connection/ConnectionScope.kt
+@@ -6,6 +6,8 @@ import android.graphics.Bitmap
+ import android.graphics.BitmapShader
+ import android.graphics.RuntimeShader
+ import android.graphics.Shader
++import android.os.Build
++import androidx.annotation.RequiresApi
+ import androidx.compose.foundation.Canvas
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+@@ -15,18 +17,22 @@ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.setValue
+ import androidx.compose.runtime.withFrameNanos
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.ShaderBrush
+ import androidx.compose.ui.graphics.drawscope.DrawScope
+ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.compose.LocalLifecycleOwner
+ import androidx.lifecycle.compose.currentStateAsState
+ import kotlin.math.PI
++import kotlin.math.abs
+ import kotlin.math.ceil
+ import kotlin.math.cos
+ import kotlin.math.exp
+ import kotlin.math.floor
+ import kotlin.math.max
+ import kotlin.math.min
++import kotlin.math.pow
+ import kotlin.math.roundToInt
+ import kotlin.math.sqrt
+ 
+@@ -35,9 +41,9 @@ import kotlin.math.sqrt
+  * sweep, with an erase gap ahead of the pen and older beats fading. Green while connected, orange
+  * while slow or unstable, pearl or ink while reconnecting or switching, and red only while offline.
+  *
+- * One AGSL [RuntimeShader] rect ([ConnectionScopeShaders]) over the CPU-lit field, ticked at 30
+- * fps. It stops drawing off screen and when the app isn't resumed; under reduce motion it's a still
+- * trace redrawn only when the status changes.
++ * One AGSL [RuntimeShader] rect ([ConnectionScopeShaders]) over the CPU-lit field, or one Canvas
++ * circle per dot before Android 13, ticked at 30 fps. It stops drawing off screen and when the app
++ * isn't resumed; under reduce motion it's a still trace redrawn only when the status changes.
+  */
+ @Composable
+ fun ConnectionScopeView(monitor: ConnectionMonitor, isHidden: Boolean, modifier: Modifier = Modifier) {
+@@ -166,12 +172,8 @@ internal class ConnectionScopeRenderer {
+     var highContrast = false
+ 
+     private val raster = ConnectionTraceRaster()
+-    private val shader = RuntimeShader(ConnectionScopeShaders.CONNECTION_SCOPE_FRAGMENT)
+-    private val brush = ShaderBrush(shader)
++    private val shaderPass = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) ConnectionScopeShaderPass() else null
+     private var grid: DotScopeGrid? = null
+-    /** Two fields, alternated per frame, so the render thread never reads one being written. */
+-    private var fields: List<Pair<Bitmap, BitmapShader>> = emptyList()
+-    private var frameIndex = 0
+     private var pixels = IntArray(0)
+     private var lastFrame: Double? = null
+     /** The trace's colour now, easing toward the status's ([ConnectionTraceTint]). */
+@@ -191,22 +193,13 @@ internal class ConnectionScopeRenderer {
+         if (next != grid) {
+             grid = next
+             pixels = IntArray(next.count)
+-            fields = List(2) {
+-                val bitmap = Bitmap.createBitmap(next.columns, next.rows, Bitmap.Config.ARGB_8888)
+-                bitmap to BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply {
+-                    filterMode = BitmapShader.FILTER_MODE_NEAREST
+-                }
+-            }
+-            frameIndex = 0
++            if (shaderPass != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) shaderPass.resize(next)
+         }
+         return grid
+     }
+ 
+     fun draw(scope: DrawScope, monitor: ConnectionMonitor) {
+         val grid = prepareGrid(scope) ?: return
+-        if (fields.isEmpty()) return
+-        val (bitmap, fieldShader) = fields[frameIndex]
+-        frameIndex = (frameIndex + 1) % fields.size
+ 
+         val now = monitor.now()
+         val elapsed = min(0.1, now - (lastFrame ?: now))
+@@ -216,23 +209,130 @@ internal class ConnectionScopeRenderer {
+         val target = ConnectionTraceTint.colors(monitor.health.display.status, isDark, highContrast)
+             ?: (palette.main to palette.mainCore)
+         val current = trace
+-        trace = if (current != null && !isStill && elapsed > 0) {
++        val next = if (current != null && !isStill && elapsed > 0) {
+             // The whole trace takes the new status's colour over about a third of a second.
+             val k = (1 - exp(-elapsed / 0.12)).toFloat()
+             (current.first + (target.first - current.first) * k) to (current.second + (target.second - current.second) * k)
+         } else {
+             target
+         }
++        trace = next
+ 
+         raster.render(monitor.health, grid, now, elapsed, isStill, highContrast, pixels)
++        val (main, mainCore) = next
++        if (shaderPass != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            shaderPass.draw(scope, grid, pixels, isDark, highContrast, main, mainCore, palette)
++        } else {
++            drawDots(scope, grid, main, mainCore, palette)
++        }
++    }
++
++    /** [ConnectionScopeShaders]' dots as Canvas circles, from the same field. */
++    private fun drawDots(scope: DrawScope, grid: DotScopeGrid, main: ScopeColor, mainCore: ScopeColor, palette: ScopePalette) {
++        val sc = grid.scale
++        val pitch = grid.pitch
++        val w = grid.width
++        val h = grid.height
++        val rr = min(cornerRadius, min(w, h) * 0.5f)
++        val unlit = if (highContrast) 1.3f else 1f
++        val top = if (isDark) 0.96f else 1f
++        val gamma = if (isDark) 0.9f else 0.75f
++        val alert = palette.alert
++        val alertCore = palette.alertCore
++        for (row in 0 until grid.rows) {
++            val cy = grid.originY + (row + 0.5f) * pitch
++            val py = cy / sc
++            val yn = abs(py - h * 0.5f) / (h * 0.5f)
++            val a0 = (if (isDark) 0.06f else 0.075f) * (1 - 0.7f * smoothstep(0.35f, 0.95f, yn)) * unlit
++            val qy = abs(py - h * 0.5f) - (h * 0.5f - rr)
++            for (column in 0 until grid.columns) {
++                val cx = grid.originX + (column + 0.5f) * pitch
++                val px = cx / sc
++                val qx = abs(px - w * 0.5f) - (w * 0.5f - rr)
++                val outX = max(qx, 0f)
++                val outY = max(qy, 0f)
++                val cap = rr - sqrt(outX * outX + outY * outY) - min(max(qx, qy), 0f)
++                val edge = (min(px - windowInset, (w - px) - windowInset) / max(windowFade, 1f)).coerceIn(0f, 1f)
++                val shade = smoothstep(2f, 6.5f, cap) * edge * edge * (3 - 2 * edge)
++                if (shade <= 0f) continue
++
++                val value = pixels[row * grid.columns + column]
++                val ia = ((value shr 16) and 0xFF) / 255f * FIELD_SCALE
++                val im = ((value shr 8) and 0xFF) / 255f * FIELD_SCALE
++                val fresh = (value and 0xFF) / 255f
++                val tot = ia + im
++                val p = (1 - (1 - min(ia, 1f)) * (1 - min(im, 1f))).coerceIn(0f, 1f)
++                val lit = max(p, 1e-5f)
++                val alpha = (a0 + (top - a0) * lit.pow(gamma * (1.4f - 0.4f * fresh))) * shade
++                if (alpha < 0.004f) continue
++                val shrink = 1 + ((0.82f + 0.18f * fresh) - 1) * smoothstep(0.03f, 0.2f, p)
++                val radius = (0.25f + 0.17f * lit.pow(0.6f)) * shrink * pitch
++
++                val core = (p * p * 1.1f).coerceIn(0f, 0.9f) * (0.3f + 0.7f * fresh)
++                val own = if (tot > 0.02f) ia / tot else 0f
++                val r = mix(mix(main.r, mainCore.r, core), mix(alert.r, alertCore.r, core), own)
++                val g = mix(mix(main.g, mainCore.g, core), mix(alert.g, alertCore.g, core), own)
++                val b = mix(mix(main.b, mainCore.b, core), mix(alert.b, alertCore.b, core), own)
++                scope.drawCircle(
++                    Color(r.coerceIn(0f, 1f), g.coerceIn(0f, 1f), b.coerceIn(0f, 1f), alpha.coerceIn(0f, 1f)),
++                    radius,
++                    Offset(cx, cy),
++                )
++            }
++        }
++    }
++
++    private fun mix(a: Float, b: Float, t: Float): Float = a + (b - a) * t
++
++    private fun smoothstep(edge0: Float, edge1: Float, x: Float): Float {
++        val t = ((x - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
++        return t * t * (3 - 2 * t)
++    }
++}
++
++@RequiresApi(Build.VERSION_CODES.TIRAMISU)
++private class ConnectionScopeShaderPass {
++    private val shader = RuntimeShader(ConnectionScopeShaders.CONNECTION_SCOPE_FRAGMENT)
++    private val brush = ShaderBrush(shader)
++    /** Two fields, alternated per frame, so the render thread never reads one being written. */
++    private var fields: List<Pair<Bitmap, BitmapShader>> = emptyList()
++    private var frameIndex = 0
++
++    fun resize(grid: DotScopeGrid) {
++        fields = List(2) {
++            val bitmap = Bitmap.createBitmap(grid.columns, grid.rows, Bitmap.Config.ARGB_8888)
++            bitmap to BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply {
++                filterMode = BitmapShader.FILTER_MODE_NEAREST
++            }
++        }
++        frameIndex = 0
++    }
++
++    fun draw(
++        scope: DrawScope,
++        grid: DotScopeGrid,
++        pixels: IntArray,
++        isDark: Boolean,
++        highContrast: Boolean,
++        main: ScopeColor,
++        mainCore: ScopeColor,
++        palette: ScopePalette,
++    ) {
++        if (fields.isEmpty()) return
++        val (bitmap, fieldShader) = fields[frameIndex]
++        frameIndex = (frameIndex + 1) % fields.size
+         bitmap.setPixels(pixels, 0, grid.columns, 0, 0, grid.columns, grid.rows)
+         shader.setInputShader("field", fieldShader)
+-
+-        val (main, mainCore) = trace!!
+         shader.setFloatUniform("grid", grid.pitch, grid.columns.toFloat(), grid.rows.toFloat(), grid.scale)
+         shader.setFloatUniform("origin", grid.originX, grid.originY, grid.width, grid.height)
+-        shader.setFloatUniform("state", if (isDark) 1f else 0f, if (highContrast) 1.3f else 1f, FIELD_SCALE, 0f)
+-        shader.setFloatUniform("window", windowInset, windowFade, windowInset, cornerRadius)
++        shader.setFloatUniform("state", if (isDark) 1f else 0f, if (highContrast) 1.3f else 1f, ConnectionScopeRenderer.FIELD_SCALE, 0f)
++        shader.setFloatUniform(
++            "window",
++            ConnectionScopeRenderer.windowInset,
++            ConnectionScopeRenderer.windowFade,
++            ConnectionScopeRenderer.windowInset,
++            ConnectionScopeRenderer.cornerRadius,
++        )
+         shader.setFloatUniform("mainTint", main.r, main.g, main.b, main.a)
+         shader.setFloatUniform("mainCore", mainCore.r, mainCore.g, mainCore.b, mainCore.a)
+         shader.setFloatUniform("alertTint", palette.alert.r, palette.alert.g, palette.alert.b, palette.alert.a)
+diff --git a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/connection/ConnectionScopeShaders.kt b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/connection/ConnectionScopeShaders.kt
+index e833a075..a3b0aefe 100644
+--- a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/connection/ConnectionScopeShaders.kt
++++ b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/connection/ConnectionScopeShaders.kt
+@@ -6,8 +6,8 @@ package ai.opencode.feature.settings.connection
+  *
+  * Metal reads the field from a buffer; here it is a `columns × rows` bitmap sampled at cell
+  * centres ([ConnectionScopeRenderer.FIELD_SCALE] packs light above 1 into a byte). Coordinates are
+- * the draw's local pixels, as Metal's `position`. minSdk is 33, so `RuntimeShader` (API 33) is
+- * always available.
++ * the draw's local pixels, as Metal's `position`. `RuntimeShader` is API 33; before that
++ * [ConnectionScopeRenderer] draws the same dots on a Canvas.
+  *
+  * Uniforms:
+  * - `grid`: pitch (px), columns, rows, scale (px per dp)
+diff --git a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/onboarding/SignalField.kt b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/onboarding/SignalField.kt
+index 8a0b1f83..02bba5a4 100644
+--- a/feature/settings/src/main/kotlin/ai/opencode/feature/settings/onboarding/SignalField.kt
++++ b/feature/settings/src/main/kotlin/ai/opencode/feature/settings/onboarding/SignalField.kt
+@@ -8,7 +8,10 @@ import ai.opencode.core.motion.rememberReduceMotion
+ import ai.opencode.core.ui.OpenCodeTheme
+ import ai.opencode.feature.settings.onboarding.OnboardingPlaygroundFeature.Phase
+ import ai.opencode.feature.settings.onboarding.OnboardingPlaygroundFeature.Variant
++import android.graphics.Paint
+ import android.graphics.RuntimeShader
++import android.os.Build
++import androidx.annotation.RequiresApi
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.runtime.Composable
+@@ -20,7 +23,12 @@ import androidx.compose.runtime.rememberUpdatedState
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.drawWithCache
+ import androidx.compose.ui.geometry.Rect
++import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.ShaderBrush
++import androidx.compose.ui.graphics.drawscope.DrawScope
++import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
++import androidx.compose.ui.graphics.nativeCanvas
++import androidx.compose.ui.graphics.toArgb
+ import androidx.compose.ui.semantics.clearAndSetSemantics
+ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.compose.LocalLifecycleOwner
+@@ -28,9 +36,15 @@ import androidx.lifecycle.compose.currentStateAsState
+ import kotlin.math.E
+ import kotlin.math.PI
+ import kotlin.math.abs
++import kotlin.math.ceil
++import kotlin.math.cos
++import kotlin.math.exp
+ import kotlin.math.max
+ import kotlin.math.min
++import kotlin.math.pow
+ import kotlin.math.roundToInt
++import kotlin.math.sin
++import kotlin.math.sqrt
+ 
+ /** The onboarding's tuning values, baked to their defaults. */
+ internal object OnboardingTunables {
+@@ -103,9 +117,9 @@ internal data class SignalFieldScene(
+ 
+ /**
+  * The full-screen LED field behind the onboarding: a fixed grid of dots, the EKG trace, scan
+- * ripples, the server's answering ripple and the heartbeat wipe, in one AGSL pass. Text and
+- * controls stay Compose above it. Still under Reduce Motion: drawn only when the scene changes.
+- * Paused while the screen isn't resumed.
++ * ripples, the server's answering ripple and the heartbeat wipe, in one AGSL pass (plain Canvas
++ * dots before Android 13). Text and controls stay Compose above it. Still under Reduce Motion:
++ * drawn only when the scene changes. Paused while the screen isn't resumed.
+  */
+ @Composable
+ internal fun SignalFieldView(scene: SignalFieldScene, modifier: Modifier = Modifier) {
+@@ -136,20 +150,35 @@ internal fun SignalFieldView(scene: SignalFieldScene, modifier: Modifier = Modif
+             .fillMaxSize()
+             .clearAndSetSemantics { }
+             .drawWithCache {
+-                val shader = RuntimeShader(SignalFieldShaderSource)
+-                val brush = ShaderBrush(shader)
++                val shaderPass = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) SignalFieldShaderPass() else null
+                 onDrawBehind {
+                     renderer.isDark = isDark
+                     renderer.highContrast = highContrast
+                     renderer.isStill = isStill
+-                    if (renderer.draw(shader, currentScene, frameTime.doubleValue, size.width, size.height, density)) {
+-                        drawRect(brush)
++                    val frameScene = currentScene
++                    if (renderer.advance(frameScene, frameTime.doubleValue, size.width, size.height, density)) {
++                        if (shaderPass != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++                            shaderPass.draw(this, renderer, frameScene)
++                        } else {
++                            renderer.drawDots(this, frameScene)
++                        }
+                     }
+                 }
+             },
+     )
+ }
+ 
++@RequiresApi(Build.VERSION_CODES.TIRAMISU)
++private class SignalFieldShaderPass {
++    private val shader = RuntimeShader(SignalFieldShaderSource)
++    private val brush = ShaderBrush(shader)
++
++    fun draw(scope: DrawScope, renderer: SignalFieldRenderer, scene: SignalFieldScene) {
++        renderer.setUniforms(shader, scene)
++        scope.drawRect(brush)
++    }
++}
++
+ /**
+  * A spring in duration and bounce (ω = 2π / duration, ζ = 1 − bounce), stepped at a fixed
+  * 480 Hz like knobs' solver: a new target keeps the position and velocity it has.
+@@ -182,7 +211,7 @@ internal class FieldSpring(var value: Double) {
+     }
+ }
+ 
+-/** Springs the field's channels toward the scene and feeds them to the shader. A plain object. */
++/** Springs the field's channels toward the scene and feeds them to the shader or the Canvas dots. A plain object. */
+ internal class SignalFieldRenderer {
+     /** Every channel the field draws, each its own spring. */
+     private class Channels {
+@@ -212,16 +241,34 @@ internal class SignalFieldRenderer {
+     private var heartbeats = 0
+     /** The heartbeat's second beat, still to come. */
+     private var pendingEcho: Double? = null
++    private var widthPx = 0f
++    private var heightPx = 0f
++    private var scale = 1f
++
++    // The Canvas field's per-frame buffers, reused while the size holds.
++    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeCap = Paint.Cap.ROUND }
++    private var columnLow = FloatArray(0)
++    private var columnHigh = FloatArray(0)
++    private var rowLight = FloatArray(0)
++    private var dotKeys = IntArray(0)
++    private var dotXs = FloatArray(0)
++    private var dotYs = FloatArray(0)
++    private var points = FloatArray(0)
++    private val bucketCounts = IntArray(DOT_BUCKETS)
++    private val bucketStarts = IntArray(DOT_BUCKETS)
+ 
+     fun resetClock() {
+         lastFrame = null
+     }
+ 
+-    /** Steps to [now] (seconds on the frame clock) and sets [shader]'s uniforms. False draws nothing. */
+-    fun draw(shader: RuntimeShader, scene: SignalFieldScene, now: Double, widthPx: Float, heightPx: Float, scale: Float): Boolean {
++    /** Steps to [now] (seconds on the frame clock) for a field of [widthPx] × [heightPx]. False draws nothing. */
++    fun advance(scene: SignalFieldScene, now: Double, widthPx: Float, heightPx: Float, scale: Float): Boolean {
+         val width = widthPx / scale
+         val height = heightPx / scale
+         if (width <= 1 || height <= 1) return false
++        this.widthPx = widthPx
++        this.heightPx = heightPx
++        this.scale = scale
+         retarget(scene)
+         if (!hasStarted || isStill) {
+             // The first frame is the resting state; Reduce Motion never travels.
+@@ -234,7 +281,6 @@ internal class SignalFieldRenderer {
+             lastFrame = now
+             step(dt, scene)
+         }
+-        setUniforms(shader, scene, width, height, scale)
+         return true
+     }
+ 
+@@ -331,13 +377,19 @@ internal class SignalFieldRenderer {
+         pendingEcho = null
+     }
+ 
+-    private fun setUniforms(shader: RuntimeShader, scene: SignalFieldScene, w: Float, h: Float, scale: Float) {
+-        val ink = when {
+-            isDark && !highContrast -> floatArrayOf(0.886f, 0.906f, 0.945f)
+-            isDark -> floatArrayOf(1f, 1f, 1f)
+-            !highContrast -> floatArrayOf(0.137f, 0.169f, 0.227f)
+-            else -> floatArrayOf(0.03f, 0.05f, 0.10f)
+-        }
++    private fun ink(): FloatArray = when {
++        isDark && !highContrast -> floatArrayOf(0.886f, 0.906f, 0.945f)
++        isDark -> floatArrayOf(1f, 1f, 1f)
++        !highContrast -> floatArrayOf(0.137f, 0.169f, 0.227f)
++        else -> floatArrayOf(0.03f, 0.05f, 0.10f)
++    }
++
++    /** Sets [shader]'s uniforms from the last [advance]. */
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
++    fun setUniforms(shader: RuntimeShader, scene: SignalFieldScene) {
++        val w = widthPx / scale
++        val h = heightPx / scale
++        val ink = ink()
+         val c = channels
+         val pitch = (7 * scale).roundToInt().toFloat()
+         // Reduce Motion keeps the field's shapes and drops the travel: no rings in flight.
+@@ -368,4 +420,188 @@ internal class SignalFieldRenderer {
+         shader.setFloatUniform("wipe", c.wipe.value.toFloat(), 1 - c.quiet.value.toFloat(), if (isStill) 0f else height, c.fieldLight.value.toFloat())
+         shader.setFloatUniform("band", c.quiet.value.toFloat(), OnboardingTunables.bandHeight.toFloat(), 0f, 0f)
+     }
++
++    /**
++     * [SignalFieldShaderSource]'s field on the CPU from the last [advance]: each dot's light and
++     * size, binned into a few alpha and radius steps so a frame is one `drawPoints` per bin.
++     */
++    fun drawDots(scope: DrawScope, scene: SignalFieldScene) {
++        val sc = scale
++        val w = widthPx / sc
++        val h = heightPx / sc
++        val pitch = max(1f, (7 * sc).roundToInt().toFloat())
++        val columns = ceil(widthPx / pitch).toInt()
++        val rows = ceil(heightPx / pitch).toInt()
++        val count = columns * rows
++        if (columnLow.size != columns) {
++            columnLow = FloatArray(columns)
++            columnHigh = FloatArray(columns)
++        }
++        if (rowLight.size != rows * 3) rowLight = FloatArray(rows * 3)
++        if (dotKeys.size != count) {
++            dotKeys = IntArray(count)
++            dotXs = FloatArray(count)
++            dotYs = FloatArray(count)
++            points = FloatArray(count * 2)
++        }
++
++        val c = channels
++        val cellPt = pitch / sc
++        val resting = (OnboardingTunables.restingLight * if (highContrast) 1.4 else 1.0).toFloat()
++        val beat = max(0.0, c.beat.value).toFloat()
++        val failed = c.failed.value.toFloat()
++        val traceLight = c.traceLight.value.toFloat()
++        val traceY = c.traceY.value.toFloat()
++        val blip = OnboardingTunables.heartbeatHeight.toFloat() * (c.blip.value + max(0.0, c.beat.value)).toFloat()
++        val traceX = w * 0.5f
++        val ringLight = if (isStill) 0f else (c.scanning.value * OnboardingTunables.rippleLight).toFloat()
++        val travel = ringTravel.toFloat()
++        val spacing = OnboardingTunables.rippleSpacing.toFloat()
++        val displacement = if (isStill) 0f else OnboardingTunables.rippleAmplitude.toFloat()
++        val ap = scene.aperture
++        val apX = ap.center.x
++        val apY = ap.center.y
++        val apertureHalf = max(min(ap.width, ap.height) / 2, 1f)
++        val found = c.found.value.toFloat()
++        val reply = c.reply.value.toFloat()
++        val reach = max(w, h) * 0.85f
++        val echo = c.echo.value.toFloat()
++        val replyX = w * 0.79f
++        val replyY = h * 0.2f
++        val progress = c.wipe.value.toFloat().coerceIn(0f, 1f)
++        val covers = 1 - c.quiet.value.toFloat()
++        val wiggle = if (isStill) 0f else OnboardingTunables.heartbeatHeight.toFloat()
++        val fieldLight = c.fieldLight.value.toFloat()
++        val quiet = c.quiet.value.toFloat()
++        val bandHeight = OnboardingTunables.bandHeight.toFloat()
++        val frontPulse = sin(PI.toFloat() * progress) * covers
++        val ringReach = 0.45f * max(w, h)
++
++        for (column in 0 until columns) {
++            val x = (column + 0.5f) * pitch / sc
++            val y0 = traceY + signalEKG(x - cellPt * 0.5f, traceX, blip)
++            val y1 = traceY + signalEKG(x, traceX, blip)
++            val y2 = traceY + signalEKG(x + cellPt * 0.5f, traceX, blip)
++            columnLow[column] = min(min(y0, y1), y2)
++            columnHigh[column] = max(max(y0, y1), y2)
++        }
++        for (row in 0 until rows) {
++            val y = (row + 0.5f) * pitch / sc
++            val envelope = sin(PI.toFloat() * ((y - 0.04f * h) / (0.92f * h)).coerceIn(0f, 1f)).pow(2)
++            rowLight[row * 3] = resting * envelope * (1 - quiet * 0.83f) * (1 - 0.35f * failed)
++            rowLight[row * 3 + 1] = signalGauss((y - traceY) / max(bandHeight, 1f))
++            rowLight[row * 3 + 2] = (-0.1f + progress * 1.2f) * w + signalEKG(y, h * 0.5f, wiggle) * 0.6f
++        }
++
++        bucketCounts.fill(0)
++        for (row in 0 until rows) {
++            val centreY = (row + 0.5f) * pitch
++            val py = centreY / sc
++            val base = rowLight[row * 3]
++            val bandLight = rowLight[row * 3 + 1]
++            val frontX = rowLight[row * 3 + 2]
++            val flashRow = beat * 0.35f * signalGauss((py - traceY) / 160f)
++            for (column in 0 until columns) {
++                val index = row * columns + column
++                val centreX = (column + 0.5f) * pitch
++                val px = centreX / sc
++                val fx = px - apX
++                val fy = py - apY
++                val d = sqrt(fx * fx + fy * fy)
++                val outside = smoothstep(apertureHalf * 0.9f, apertureHalf * 1.3f, d)
++                val rings = if (ringLight > 0f && outside > 0f) {
++                    val s = (d - apertureHalf - travel) / max(spacing, 1f)
++                    (0.5f + 0.5f * cos(2 * PI.toFloat() * s)).pow(8) * exp(-(d - apertureHalf) / ringReach) * outside * ringLight
++                } else {
++                    0f
++                }
++                val r1 = signalWave(d, found, reach) * outside
++                val r2 = if (echo > 0f) signalWave(distance(px - replyX, py - replyY), reply, reach) * echo else 0f
++                val r3 = if (echo < 1f) signalWave(distance(px - traceX, py - traceY), reply, reach) * (1 - echo) * 0.7f else 0f
++                val dy = max(max(columnLow[column] - py, py - columnHigh[column]), 0f)
++                val line = signalGauss(dy / (0.55f * cellPt)) * traceLight
++                val front = if (frontPulse > 0f) signalGauss((px - frontX) / 19f) * frontPulse else 0f
++                val covered = ((frontX - px) / (0.08f * w)).coerceIn(0f, 1f) * covers
++                val flash = if (flashRow > 0f) flashRow * signalGauss((px - traceX) / (0.6f * w)) else 0f
++                val field = base + flash + (0.55f * r1 + 0.65f * (r2 + r3) + rings) * (1 - quiet * 0.7f)
++                var lit = (field * fieldLight + line * 0.78f) * (1 + (bandLight - 1) * quiet) * (1 - covered)
++                lit += front * 0.85f * (1 - quiet * 0.65f)
++                lit = lit.coerceIn(0f, 1f)
++                if (lit < 0.002f) {
++                    dotKeys[index] = -1
++                    continue
++                }
++                val push = (r1 + r2 + r3 + rings * 0.6f) * displacement * sc
++                if (d > 0.5f && push != 0f) {
++                    dotXs[index] = centreX + fx / d * push
++                    dotYs[index] = centreY + fy / d * push
++                } else {
++                    dotXs[index] = centreX
++                    dotYs[index] = centreY
++                }
++                val grow = (r1 + r2 + r3 + front + rings * 0.5f + line * (0.5f + beat)).coerceIn(0f, 1f)
++                val alphaStep = min(DOT_ALPHA_STEPS - 1, (sqrt(lit) * DOT_ALPHA_STEPS).toInt())
++                val radiusStep = min(DOT_RADIUS_STEPS - 1, (grow * DOT_RADIUS_STEPS).toInt())
++                val key = alphaStep * DOT_RADIUS_STEPS + radiusStep
++                dotKeys[index] = key
++                bucketCounts[key]++
++            }
++        }
++
++        var start = 0
++        for (key in 0 until DOT_BUCKETS) {
++            bucketStarts[key] = start
++            start += bucketCounts[key]
++        }
++        for (index in 0 until count) {
++            val key = dotKeys[index]
++            if (key < 0) continue
++            val slot = bucketStarts[key]++
++            points[slot * 2] = dotXs[index]
++            points[slot * 2 + 1] = dotYs[index]
++        }
++
++        val ink = ink()
++        scope.drawIntoCanvas { canvas ->
++            var offset = 0
++            for (key in 0 until DOT_BUCKETS) {
++                val n = bucketCounts[key]
++                if (n == 0) continue
++                val alphaStep = key / DOT_RADIUS_STEPS
++                val radiusStep = key % DOT_RADIUS_STEPS
++                val alpha = ((alphaStep + 0.5f) / DOT_ALPHA_STEPS).pow(2)
++                val radius = (1.05f + radiusStep / (DOT_RADIUS_STEPS - 1f) * 0.6f) * sc
++                dotPaint.color = Color(ink[0], ink[1], ink[2], alpha).toArgb()
++                dotPaint.strokeWidth = radius * 2
++                canvas.nativeCanvas.drawPoints(points, offset * 2, n * 2, dotPaint)
++                offset += n
++            }
++        }
++    }
++
++    private companion object {
++        const val DOT_ALPHA_STEPS = 16
++        const val DOT_RADIUS_STEPS = 3
++        const val DOT_BUCKETS = DOT_ALPHA_STEPS * DOT_RADIUS_STEPS
++
++        fun signalGauss(x: Float): Float = exp(-x * x)
++
++        fun signalEKG(x: Float, centre: Float, amplitude: Float): Float {
++            val t = (x - centre) / 40f
++            return amplitude * (-signalGauss((t + 0.28f) / 0.17f) + 0.36f * signalGauss((t - 0.08f) / 0.16f) - 0.13f * signalGauss((t + 0.75f) / 0.28f))
++        }
++
++        fun signalWave(distance: Float, progress: Float, reach: Float): Float {
++            val p = progress.coerceIn(0f, 1f)
++            if (p <= 0f || p >= 1f) return 0f
++            return signalGauss((distance - p * reach) / 26f) * sin(PI.toFloat() * p)
++        }
++
++        fun smoothstep(edge0: Float, edge1: Float, x: Float): Float {
++            val t = ((x - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
++            return t * t * (3 - 2 * t)
++        }
++
++        fun distance(x: Float, y: Float): Float = sqrt(x * x + y * y)
++    }
+ }
+diff --git a/feature/system/src/main/kotlin/ai/opencode/feature/system/SystemAction.kt b/feature/system/src/main/kotlin/ai/opencode/feature/system/SystemAction.kt
+index acb302e7..063610f8 100644
+--- a/feature/system/src/main/kotlin/ai/opencode/feature/system/SystemAction.kt
++++ b/feature/system/src/main/kotlin/ai/opencode/feature/system/SystemAction.kt
+@@ -89,7 +89,7 @@ data class SystemAction(
+ 
+         /** Percent-decoding only, as `URLComponents`: a `+` stays a `+`. */
+         private fun decode(value: String): String? =
+-            runCatching { URLDecoder.decode(value.replace("+", "%2B"), Charsets.UTF_8) }.getOrNull()
++            runCatching { URLDecoder.decode(value.replace("+", "%2B"), "UTF-8") }.getOrNull()
+     }
+ }
+ 
+diff --git a/feature/system/src/main/kotlin/ai/opencode/feature/system/intents/SystemSearchIndex.kt b/feature/system/src/main/kotlin/ai/opencode/feature/system/intents/SystemSearchIndex.kt
+index 552b9743..68ec46ad 100644
+--- a/feature/system/src/main/kotlin/ai/opencode/feature/system/intents/SystemSearchIndex.kt
++++ b/feature/system/src/main/kotlin/ai/opencode/feature/system/intents/SystemSearchIndex.kt
+@@ -177,5 +177,5 @@ internal object SystemSearchIndex {
+         if (failures != 0) AppLog.app.debug { "System search $what failed count=$failures" }
+     }
+ 
+-    private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8).replace("+", "%20")
++    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+ }
+diff --git a/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/list/TranscriptList.kt b/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/list/TranscriptList.kt
+index 9eaecf12..b993f5c9 100644
+--- a/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/list/TranscriptList.kt
++++ b/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/list/TranscriptList.kt
+@@ -11,6 +11,8 @@ import ai.opencode.core.ui.drawerPanSelectionHandles
+ import ai.opencode.feature.media.AgentImageViewport
+ import ai.opencode.feature.media.AgentImageVisibility
+ import ai.opencode.feature.media.LinkPreviewStore
++import ai.opencode.feature.media.PlatformBackHandler
++import ai.opencode.feature.media.PlatformBackPriority
+ import ai.opencode.feature.media.LocalAgentImageRow
+ import ai.opencode.feature.media.LocalAgentImageViewport
+ import ai.opencode.feature.media.LocalLinkPreviewRevision
+@@ -47,11 +49,8 @@ import ai.opencode.feature.transcript.user.TranscriptAgentMessageReveal
+ import ai.opencode.feature.transcript.user.TranscriptMessageRow
+ import ai.opencode.feature.transcript.user.TranscriptUserMessage
+ import ai.opencode.feature.transcript.user.UserMessageRun
+-import ai.opencode.feature.transcript.user.findActivity
+ import android.os.SystemClock
+ import android.view.accessibility.AccessibilityManager
+-import android.window.OnBackInvokedCallback
+-import android.window.OnBackInvokedDispatcher
+ import androidx.compose.animation.AnimatedVisibility
+ import androidx.compose.animation.core.FastOutLinearInEasing
+ import androidx.compose.animation.core.MutableTransitionState
+@@ -163,14 +162,9 @@ private class TranscriptListPosition(val state: LazyListState, anchor: Pair<Stri
+ @Composable
+ private fun ReplySelectionBackHandler(selection: TranscriptReplySelection) {
+     if (!selection.isSelected || WindowInsets.isImeVisible) return
+-    val activity = LocalContext.current.findActivity() ?: return
+-    DisposableEffect(activity, selection) {
+-        val callback = OnBackInvokedCallback { selection.clear(byReader = true) }
+-        // At the app's own priority, registered as the selection begins: what opens over it later
+-        // (the drawer, a menu, an in-window sheet) registers after it and takes Back first.
+-        activity.onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback)
+-        onDispose { activity.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback) }
+-    }
++    // At the app's own priority, registered as the selection begins: what opens over it later
++    // (the drawer, a menu, an in-window sheet) registers after it and takes Back first.
++    PlatformBackHandler(enabled = true, priority = PlatformBackPriority.Default) { selection.clear(byReader = true) }
+ }
+ 
+ /** Whether the list hides while a row restored after process death loads ([decide]d on the list's first composition). */
+diff --git a/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/user/AgentMessageReveal.kt b/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/user/AgentMessageReveal.kt
+index 287b3da0..642fa4ec 100644
+--- a/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/user/AgentMessageReveal.kt
++++ b/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/user/AgentMessageReveal.kt
+@@ -5,6 +5,8 @@ import ai.opencode.core.ui.OpenCodeTheme
+ import ai.opencode.feature.media.TranscriptMetrics
+ import ai.opencode.feature.transcript.TranscriptTunables
+ import android.graphics.RuntimeShader
++import android.os.Build
++import androidx.annotation.RequiresApi
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.Immutable
+@@ -18,9 +20,14 @@ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.draw.drawBehind
+ import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.geometry.CornerRadius
++import androidx.compose.ui.geometry.RoundRect
++import androidx.compose.ui.graphics.Path
+ import androidx.compose.ui.graphics.ShaderBrush
+ import androidx.compose.ui.graphics.drawscope.DrawScope
++import androidx.compose.ui.graphics.drawscope.Stroke
+ import androidx.compose.ui.graphics.toArgb
++import kotlin.math.exp
+ import kotlin.math.max
+ import kotlin.math.min
+ import kotlin.math.pow
+@@ -165,27 +172,96 @@ fun AgentMessageRevealLight(light: Double, corners: UserSurfaceCorners = UserSur
+     )
+ }
+ 
+-/** The reveal light's shader, drawn into a surface's own bounds (shared by [AgentMessageRevealLight] and the bubble fill). */
++/** The reveal light, drawn into a surface's own bounds (shared by [AgentMessageRevealLight] and the bubble fill). */
+ internal class AgentRevealGlow {
+-    private val shader = RuntimeShader(AGENT_REVEAL_GLOW_AGSL)
+-    private val brush = ShaderBrush(shader)
++    private val shaderGlow = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) ShaderGlow() else null
+ 
+     fun DrawScope.draw(light: Double, corners: UserSurfaceCorners, dark: Boolean) {
+         if (light <= 1e-4) return
+         val (lift, glow) = AgentMessageReveal.colors(dark)
+         val full = TranscriptMetrics.bubbleCornerRadius.value
+         val tight = UserMessageRun.tightRadius.value
++        val topTrailing = if (corners.top) tight else full
++        val bottomTrailing = if (corners.bottom) tight else full
++        val fillLift = (AgentMessageReveal.fillLift * light).toFloat()
++        val innerGlow = (AgentMessageReveal.innerGlow * light).toFloat()
++        if (shaderGlow != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            with(shaderGlow) { draw(full, full, topTrailing, bottomTrailing, lift, glow, fillLift, innerGlow) }
++        } else {
++            drawCanvasGlow(full, full, topTrailing, bottomTrailing, lift, glow, fillLift, innerGlow)
++        }
++    }
++}
++
++@RequiresApi(Build.VERSION_CODES.TIRAMISU)
++private class ShaderGlow {
++    private val shader = RuntimeShader(AGENT_REVEAL_GLOW_AGSL)
++    private val brush = ShaderBrush(shader)
++
++    fun DrawScope.draw(
++        topLeading: Float,
++        bottomLeading: Float,
++        topTrailing: Float,
++        bottomTrailing: Float,
++        lift: Color,
++        glow: Color,
++        fillLift: Float,
++        innerGlow: Float,
++    ) {
+         shader.setFloatUniform("size", size.width, size.height)
+-        shader.setFloatUniform("radii", full, full, if (corners.top) tight else full, if (corners.bottom) tight else full)
++        shader.setFloatUniform("radii", topLeading, bottomLeading, topTrailing, bottomTrailing)
+         shader.setFloatUniform("density", density)
+         shader.setColorUniform("liftIn", lift.toArgb())
+         shader.setColorUniform("glowIn", glow.toArgb())
+-        shader.setFloatUniform("fillLift", (AgentMessageReveal.fillLift * light).toFloat())
+-        shader.setFloatUniform("innerGlow", (AgentMessageReveal.innerGlow * light).toFloat())
++        shader.setFloatUniform("fillLift", fillLift)
++        shader.setFloatUniform("innerGlow", innerGlow)
+         drawRect(brush)
+     }
+ }
+ 
++/** The shader's fill lift and inward edge glow as stacked inset strokes; radii in points. */
++private fun DrawScope.drawCanvasGlow(
++    topLeading: Float,
++    bottomLeading: Float,
++    topTrailing: Float,
++    bottomTrailing: Float,
++    lift: Color,
++    glow: Color,
++    fillLift: Float,
++    innerGlow: Float,
++) {
++    if (size.width <= 0f || size.height <= 0f) return
++    val maxRadius = min(size.width, size.height) / 2f
++    fun shape(inset: Float): Path {
++        fun corner(radiusPt: Float): CornerRadius {
++            val r = max(0f, min(radiusPt * density, maxRadius) - inset)
++            return CornerRadius(r, r)
++        }
++        return Path().apply {
++            addRoundRect(
++                RoundRect(
++                    left = inset,
++                    top = inset,
++                    right = size.width - inset,
++                    bottom = size.height - inset,
++                    topLeftCornerRadius = corner(topLeading),
++                    topRightCornerRadius = corner(topTrailing),
++                    bottomRightCornerRadius = corner(bottomTrailing),
++                    bottomLeftCornerRadius = corner(bottomLeading),
++                ),
++            )
++        }
++    }
++    drawPath(shape(0f), lift, alpha = fillLift.coerceIn(0f, 1f))
++    val step = 2f * density
++    var depth = 0f
++    while (depth < 21f * density && depth * 2 < min(size.width, size.height)) {
++        val alpha = (innerGlow * exp(-(depth / density + 1f) / 7f) * 0.45f).coerceIn(0f, 1f)
++        drawPath(shape(depth + step / 2), glow, alpha = alpha, style = Stroke(width = step))
++        depth += step
++    }
++}
++
+ /**
+  * When each agent's message arrived, so its reveal plays once, on arrival. The list owns it and
+  * hands each row its arrival as a value: a recycled or recomposed row reads the same clock, and a
+diff --git a/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/user/TranscriptUserBubble.kt b/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/user/TranscriptUserBubble.kt
+index 0e0f9356..41a7cdeb 100644
+--- a/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/user/TranscriptUserBubble.kt
++++ b/feature/transcript/src/main/kotlin/ai/opencode/feature/transcript/user/TranscriptUserBubble.kt
+@@ -13,6 +13,8 @@ import ai.opencode.core.ui.OpenCodeIcon
+ import ai.opencode.core.ui.OpenCodeTextStyles
+ import ai.opencode.core.ui.OpenCodeTheme
+ import ai.opencode.feature.media.TranscriptMetrics
++import ai.opencode.feature.media.PlatformBackHandler
++import ai.opencode.feature.media.PlatformBackPriority
+ import ai.opencode.feature.transcript.LocalTranscriptRowContext
+ import ai.opencode.feature.transcript.R
+ import ai.opencode.feature.transcript.markdown.marked
+@@ -25,18 +27,12 @@ import ai.opencode.feature.transcript.markdown.ui.SessionMentions
+ import ai.opencode.feature.transcript.markdown.ui.currentMarkdownStyle
+ import ai.opencode.feature.transcript.markdown.ui.rememberLinkListener
+ import ai.opencode.server.model.SessionLink
+-import android.app.Activity
+-import android.content.Context
+-import android.content.ContextWrapper
+-import android.window.OnBackInvokedCallback
+-import android.window.OnBackInvokedDispatcher
+ import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.ui.layout.LayoutCoordinates
+ import androidx.compose.ui.layout.boundsInRoot
+ import androidx.compose.ui.layout.boundsInWindow
+ import androidx.compose.ui.layout.onGloballyPositioned
+-import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.platform.LocalTextToolbar
+ import androidx.compose.ui.platform.TextToolbar
+ import androidx.compose.ui.platform.TextToolbarStatus
+@@ -573,20 +569,8 @@ private class UserBubbleSelectionToolbar(private val platform: TextToolbar, priv
+ /** Back ends the selection (iOS: tapping elsewhere), ahead of the screen's own Back while it's up. */
+ @Composable
+ private fun SelectionBackHandler(onBack: () -> Unit) {
+-    val activity = LocalContext.current.findActivity() ?: return
+-    val current by rememberUpdatedState(onBack)
+-    DisposableEffect(activity) {
+-        val callback = OnBackInvokedCallback { current() }
+-        // Above the app's own handlers (default priority), below a full-screen viewer (overlay).
+-        activity.onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT + 1, callback)
+-        onDispose { activity.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback) }
+-    }
+-}
+-
+-internal tailrec fun Context.findActivity(): Activity? = when (this) {
+-    is Activity -> this
+-    is ContextWrapper -> baseContext.findActivity()
+-    else -> null
++    // Above the app's own handlers (default priority), below a full-screen viewer (overlay).
++    PlatformBackHandler(enabled = true, priority = PlatformBackPriority.AboveDefault, onBack = onBack)
+ }
+ 
+ /**
+diff --git a/feature/voice/src/main/kotlin/ai/opencode/feature/voice/DotScopeView.kt b/feature/voice/src/main/kotlin/ai/opencode/feature/voice/DotScopeView.kt
+index 1c021ef0..03469927 100644
+--- a/feature/voice/src/main/kotlin/ai/opencode/feature/voice/DotScopeView.kt
++++ b/feature/voice/src/main/kotlin/ai/opencode/feature/voice/DotScopeView.kt
+@@ -13,7 +13,9 @@ import android.graphics.BitmapShader
+ import android.graphics.ColorSpace
+ import android.graphics.RuntimeShader
+ import android.graphics.Shader
++import android.os.Build
+ import android.util.Half
++import androidx.annotation.RequiresApi
+ import androidx.compose.foundation.Canvas
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+@@ -24,7 +26,13 @@ import androidx.compose.runtime.rememberUpdatedState
+ import androidx.compose.runtime.staticCompositionLocalOf
+ import androidx.compose.runtime.withFrameNanos
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.ShaderBrush
++import androidx.compose.ui.graphics.drawscope.DrawScope
++import androidx.compose.ui.graphics.drawscope.clipRect
++import androidx.compose.ui.graphics.drawscope.scale
+ import androidx.compose.ui.layout.onSizeChanged
+ import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.semantics.clearAndSetSemantics
+@@ -39,8 +47,10 @@ import kotlinx.coroutines.withContext
+ import java.nio.ByteBuffer
+ import java.nio.ByteOrder
+ import kotlin.math.abs
++import kotlin.math.hypot
+ import kotlin.math.max
+ import kotlin.math.min
++import kotlin.math.pow
+ import kotlin.math.sin
+ 
+ /**
+@@ -72,8 +82,9 @@ sealed interface DotScopeMode {
+  * follow the dictation level. Under Reduce Motion it is the quiet state, still; in the
+  * background it stops drawing.
+  *
+- * Android: an AGSL [RuntimeShader] ([DotScopeShaders]) drawn by a Compose [Canvas]; a
+- * `withFrameNanos` loop advances the plain-object [DotScopeRenderer] (never reducer actions) only
++ * Android: an AGSL [RuntimeShader] ([DotScopeShaders]) on API 33+, plain Canvas dots and glows
++ * below it, drawn by a Compose [Canvas]; a `withFrameNanos` loop advances the plain-object
++ * [DotScopeRenderer] (never reducer actions) only
+  * while the scope is visible: not [LocalDotScopeCovered], and the lifecycle resumed. A paused scope
+  * keeps its last frame and resumes with a reset clock, so it never fast-forwards. Under Reduce
+  * Motion it draws one still frame whenever its inputs change. After [DotScopeRenderer.QUIET_AFTER]
+@@ -128,8 +139,7 @@ fun DotScopeView(
+             .clearAndSetSemantics {},
+     ) {
+         @Suppress("UNUSED_EXPRESSION") frame
+-        val brush = scope.brush ?: return@Canvas
+-        drawRect(brush)
++        scope.draw(this)
+     }
+ }
+ 
+@@ -187,16 +197,15 @@ class DotScopeRenderer private constructor() {
+     var isQuiet = false
+         private set
+ 
+-    private val shader = RuntimeShader(DotScopeShaders.dotScopeFragment)
++    private val surface: Surface =
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) ShaderSurface() else CanvasSurface()
+     private var grid: DotScopeGrid? = null
+     private var field = FloatArray(0)
+     private var bitmap: Bitmap? = null
+-    private var publishedBitmap: Bitmap? = null
+     private var pixels: ByteBuffer? = null
+ 
+-    /** The shader brush once a frame has been drawn into it. */
+-    var brush: ShaderBrush? = null
+-        private set
++    /** Draws the last published frame; nothing before the first. */
++    fun draw(scope: DrawScope) = surface.draw(scope)
+ 
+     /** After a pause the scope resumes where it was instead of fast-forwarding. */
+     fun resetClock() {
+@@ -209,9 +218,10 @@ class DotScopeRenderer private constructor() {
+         if (next != grid) {
+             grid = next
+             field = FloatArray(max(1, next.count) * 4)
+-            val texture = createBitmap(next.columns, next.rows, Bitmap.Config.RGBA_F16, hasAlpha = true, colorSpace = ColorSpace.get(ColorSpace.Named.EXTENDED_SRGB))
+-            bitmap = texture
+-            pixels = ByteBuffer.allocateDirect(next.columns * next.rows * 8).order(ByteOrder.nativeOrder())
++            if (surface.readsTexture) {
++                bitmap = createBitmap(next.columns, next.rows, Bitmap.Config.RGBA_F16, hasAlpha = true, colorSpace = ColorSpace.get(ColorSpace.Named.EXTENDED_SRGB))
++                pixels = ByteBuffer.allocateDirect(next.columns * next.rows * 8).order(ByteOrder.nativeOrder())
++            }
+         }
+         return grid
+     }
+@@ -252,14 +262,7 @@ class DotScopeRenderer private constructor() {
+             if (generation != clockGeneration) return@withLock false
+             PerfTrace.section("dot_scope_publish") {
+                 pixels?.let { bitmap?.copyPixelsFromBuffer(it) }
+-                if (bitmap !== publishedBitmap) {
+-                    val input = BitmapShader(checkNotNull(bitmap), Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+-                        .apply { filterMode = BitmapShader.FILTER_MODE_NEAREST }
+-                    shader.setInputBuffer("field", input)
+-                    publishedBitmap = bitmap
+-                }
+-                setUniforms(grid, mode, isDark, state)
+-                if (brush == null) brush = ShaderBrush(shader)
++                surface.publish(grid, mode, isDark, state, field, bitmap)
+             }
+             true
+         }
+@@ -328,35 +331,193 @@ class DotScopeRenderer private constructor() {
+         buffer.rewind()
+     }
+ 
+-    private fun setUniforms(grid: DotScopeGrid, mode: DotScopeMode, isDark: Boolean, state: FrameState) {
+-        val palette = DotScopePalette.pearlPalette(isDark)
+-        val isDictation: Boolean
+-        val window: FloatArray
+-        val bar = floatArrayOf(0f, grid.width, 0f, 0f)
+-        val shape = floatArrayOf(grid.height / 2, 0f, 0f, 0f)
+-        when (mode) {
+-            is DotScopeMode.Preview -> {
+-                isDictation = false
+-                window = floatArrayOf(DotScopeSimulation.windowInset, DotScopeSimulation.windowFade, 0f, 0f)
++    private interface Surface {
++        /** Whether [publish] needs the half-float field texture. */
++        val readsTexture: Boolean
++        fun publish(grid: DotScopeGrid, mode: DotScopeMode, isDark: Boolean, state: FrameState, field: FloatArray, texture: Bitmap?)
++        fun draw(scope: DrawScope)
++    }
++
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
++    private class ShaderSurface : Surface {
++        private val shader = RuntimeShader(DotScopeShaders.dotScopeFragment)
++        private var publishedTexture: Bitmap? = null
++        private var brush: ShaderBrush? = null
++        override val readsTexture = true
++
++        override fun publish(grid: DotScopeGrid, mode: DotScopeMode, isDark: Boolean, state: FrameState, field: FloatArray, texture: Bitmap?) {
++            val input = checkNotNull(texture)
++            if (input !== publishedTexture) {
++                val sampler = BitmapShader(input, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
++                    .apply { filterMode = BitmapShader.FILTER_MODE_NEAREST }
++                shader.setInputBuffer("field", sampler)
++                publishedTexture = input
+             }
+-            is DotScopeMode.Dictation -> {
+-                isDictation = true
+-                val eased = state.insets ?: ScopeVector2(mode.leadingInset, mode.trailingInset)
+-                window = floatArrayOf(eased.x, 24f, eased.y, 0f)
++            setUniforms(grid, mode, isDark, state)
++            if (brush == null) brush = ShaderBrush(shader)
++        }
++
++        override fun draw(scope: DrawScope) {
++            brush?.let { scope.drawRect(it) }
++        }
++
++        private fun setUniforms(grid: DotScopeGrid, mode: DotScopeMode, isDark: Boolean, state: FrameState) {
++            val palette = DotScopePalette.pearlPalette(isDark)
++            val isDictation = mode is DotScopeMode.Dictation
++            val glow = state.glow
++            shader.setFloatUniform("grid", grid.pitch, grid.columns.toFloat(), grid.rows.toFloat(), grid.scale)
++            shader.setFloatUniform("origin", grid.originX, grid.originY, grid.width, grid.height)
++            shader.setFloatUniform("state", state.live, if (isDark) 1f else 0f, 1f, 1f)
++            shader.setFloatUniform("window", scopeWindowInsets(mode, state.insets))
++            shader.setFloatUniform("glow", glow.x, glow.y, state.breath, state.live)
++            shader.setFloatUniform("you", palette.you)
++            shader.setFloatUniform("youCore", palette.youCore)
++            shader.setFloatUniform("agent", if (isDictation) palette.you else palette.agent)
++            shader.setFloatUniform("agentCore", if (isDictation) palette.youCore else palette.agentCore)
++            shader.setFloatUniform("bar", 0f, grid.width, 0f, 0f)
++            shader.setFloatUniform("shape", grid.height / 2, 0f, 0f, 0f)
++        }
++
++        companion object {
++            fun warm() {
++                Thread { runCatching { RuntimeShader(DotScopeShaders.dotScopeFragment) } }.start()
+             }
+         }
+-        val glow = state.glow
+-        shader.setFloatUniform("grid", grid.pitch, grid.columns.toFloat(), grid.rows.toFloat(), grid.scale)
+-        shader.setFloatUniform("origin", grid.originX, grid.originY, grid.width, grid.height)
+-        shader.setFloatUniform("state", state.live, if (isDark) 1f else 0f, 1f, 1f)
+-        shader.setFloatUniform("window", window)
+-        shader.setFloatUniform("glow", glow.x, glow.y, state.breath, state.live)
+-        shader.setFloatUniform("you", palette.you)
+-        shader.setFloatUniform("youCore", palette.youCore)
+-        shader.setFloatUniform("agent", if (isDictation) palette.you else palette.agent)
+-        shader.setFloatUniform("agentCore", if (isDictation) palette.youCore else palette.agentCore)
+-        shader.setFloatUniform("bar", bar)
+-        shader.setFloatUniform("shape", shape)
++    }
++
++    /** [DotScopeShaders]' dots and glows as Canvas circles, without the bloom, blur and dither. */
++    private class CanvasSurface : Surface {
++        private var grid: DotScopeGrid? = null
++        private var field = FloatArray(0)
++        private var state: FrameState? = null
++        private var window = FloatArray(4)
++        private var isDark = true
++        private var you = FloatArray(4)
++        private var youCore = FloatArray(4)
++        private var agent = FloatArray(4)
++        private var agentCore = FloatArray(4)
++        override val readsTexture = false
++
++        override fun publish(grid: DotScopeGrid, mode: DotScopeMode, isDark: Boolean, state: FrameState, field: FloatArray, texture: Bitmap?) {
++            if (this.field.size != field.size) this.field = FloatArray(field.size)
++            field.copyInto(this.field)
++            val palette = DotScopePalette.pearlPalette(isDark)
++            val isDictation = mode is DotScopeMode.Dictation
++            this.grid = grid
++            this.state = state
++            this.isDark = isDark
++            window = scopeWindowInsets(mode, state.insets)
++            you = palette.you
++            youCore = palette.youCore
++            agent = if (isDictation) palette.you else palette.agent
++            agentCore = if (isDictation) palette.youCore else palette.agentCore
++        }
++
++        override fun draw(scope: DrawScope) {
++            val grid = grid ?: return
++            val state = state ?: return
++            drawGlows(scope, grid, state)
++            drawDots(scope, grid, state)
++        }
++
++        private fun drawGlows(scope: DrawScope, grid: DotScopeGrid, state: FrameState) {
++            val sc = grid.scale
++            val width = grid.width
++            val r = grid.height / 2
++            val rest = 0.05f * (0.6f + 0.4f * state.breath) * state.live
++            val peak = (if (isDark) 0.3f else 0.19f) * 0.55f
++            val rightInset = if (window[2] > 0f) window[2] else window[0]
++            val fade = max(window[1], 1f) / 2
++            val left = (window[0] - fade) * sc
++            val right = (width - rightInset + fade) * sc
++            if (right <= left) return
++            scope.clipRect(left = left, right = right) {
++                drawGlow(this, state.glow.x + rest, isLeft = true, width, r, sc, peak)
++                drawGlow(this, state.glow.y + rest, isLeft = false, width, r, sc, peak)
++            }
++        }
++
++        private fun drawGlow(scope: DrawScope, level: Float, isLeft: Boolean, width: Float, r: Float, sc: Float, peak: Float) {
++            val alpha = min(1f, level) * peak
++            if (alpha <= 0.002f) return
++            val reachIn = 34f + 36f * level
++            val reachOut = 26f
++            val radius = (reachIn + reachOut) * sc
++            val shift = (reachIn - reachOut) / 2
++            val x = if (isLeft) 28f + shift else width - 28f - shift
++            val height = 2 * 0.42f * (0.85f + 0.15f * level) * r * sc
++            val centre = Offset(x * sc, r * sc)
++            val colour = glowColour(if (isLeft) you else agent, if (isLeft) youCore else agentCore)
++            val brush = Brush.radialGradient(
++                0f to colour.copy(alpha = alpha),
++                0.5f to colour.copy(alpha = alpha * 0.6f),
++                1f to colour.copy(alpha = 0f),
++                center = centre,
++                radius = radius,
++            )
++            scope.scale(scaleX = 1f, scaleY = min(1f, height / radius), pivot = centre) {
++                drawCircle(brush, radius = radius, center = centre)
++            }
++        }
++
++        private fun glowColour(base: FloatArray, core: FloatArray): Color = if (isDark) {
++            val c = saturate(mix(base[0], core[0], 0.5f), mix(base[1], core[1], 0.5f), mix(base[2], core[2], 0.5f), 1.5f)
++            Color(c[0], c[1], c[2])
++        } else {
++            val c = saturate(base[0], base[1], base[2], 1.95f)
++            Color(mix(c[0], 1f, 0.15f), mix(c[1], 1f, 0.15f), mix(c[2], 1f, 0.15f))
++        }
++
++        private fun drawDots(scope: DrawScope, grid: DotScopeGrid, state: FrameState) {
++            val sc = grid.scale
++            val pitch = grid.pitch
++            val width = grid.width
++            val r = grid.height / 2
++            val dark = isDark
++            val top = if (dark) 0.96f else 1f
++            for (row in 0 until grid.rows) {
++                val cy = grid.originY + (row + 0.5f) * pitch
++                val ptY = cy / sc
++                val yn = abs(ptY - r) / r
++                val a0 = (if (dark) 0.06f else 0.075f) * (1 - 0.7f * smoothstep(0.35f, 0.95f, yn)) * (0.5f + 0.5f * state.live)
++                for (column in 0 until grid.columns) {
++                    val cx = grid.originX + (column + 0.5f) * pitch
++                    val ptX = cx / sc
++                    val cap = r - hypot(max(abs(ptX - width / 2) - (width / 2 - r), 0f), ptY - r)
++                    val mask = smoothstep(2f, 6.5f, cap)
++                    if (mask <= 0f) continue
++                    val win = scopeWindow(window, ptX, width)
++                    if (win <= 0f) continue
++                    val i = (row * grid.columns + column) * 4
++                    val iu = field[i]
++                    val ia = field[i + 1]
++                    val fresh = field[i + 2]
++                    val tot = iu + ia
++                    val p = (1 - (1 - min(iu, 1f)) * (1 - min(ia, 1f))).coerceIn(0f, 1f)
++                    val ratio = iu / max(tot, 1e-4f)
++                    val blur = 1 - win
++                    val lit = max(p, 1e-5f)
++                    val shown = a0 + (top - a0) * lit.pow((if (dark) 0.9f else 0.75f) * mix(1.4f, 1f, fresh))
++                    val alpha = shown * mask * win
++                    if (alpha <= 0.002f) continue
++                    val radius = (0.25f + 0.17f * lit.pow(0.6f)) * mix(1f, mix(0.82f, 1f, fresh), smoothstep(0.03f, 0.2f, p)) * pitch * (1 + 0.35f * blur)
++                    val core = (p * p * 1.1f).coerceIn(0f, 0.9f) * mix(0.3f, 1f, fresh)
++                    val side = 1 - smoothstep(0.42f, 0.58f, ptX / width)
++                    val own = mix(side, ratio, smoothstep(0.02f, 0.12f, tot))
++                    val colour = Color(dotChannel(0, core, own), dotChannel(1, core, own), dotChannel(2, core, own))
++                    val centre = Offset(cx, cy)
++                    val halo = 0.11f * p * p * mask * win
++                    if (halo > 0.002f) scope.drawCircle(colour, radius = radius * 1.8f, center = centre, alpha = halo)
++                    scope.drawCircle(colour, radius = radius, center = centre, alpha = alpha)
++                }
++            }
++        }
++
++        private fun dotChannel(k: Int, core: Float, own: Float): Float {
++            val cy = mix(you[k], youCore[k], core)
++            val ca = mix(agent[k], agentCore[k], core)
++            return (mix(ca, cy, own) + (cy - ca) * (own - 0.5f) * 0.4f).coerceIn(0f, 1f)
++        }
+     }
+ 
+     companion object {
+@@ -368,7 +529,7 @@ class DotScopeRenderer private constructor() {
+         fun prepare() {
+             if (prepared) return
+             prepared = true
+-            Thread { runCatching { RuntimeShader(DotScopeShaders.dotScopeFragment) } }.start()
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) ShaderSurface.warm()
+         }
+ 
+         @Volatile
+@@ -406,3 +567,32 @@ class DotScopeRenderer private constructor() {
+         }
+     }
+ }
++
++/** [DotScopeShaders]' `window` uniform: inset from each end and fade length (pt), then square ends. */
++private fun scopeWindowInsets(mode: DotScopeMode, insets: ScopeVector2?): FloatArray = when (mode) {
++    is DotScopeMode.Preview -> floatArrayOf(DotScopeSimulation.windowInset, DotScopeSimulation.windowFade, 0f, 0f)
++    is DotScopeMode.Dictation -> {
++        val eased = insets ?: ScopeVector2(mode.leadingInset, mode.trailingInset)
++        floatArrayOf(eased.x, 24f, eased.y, 0f)
++    }
++}
++
++/** [DotScopeShaders]' `scopeWindow` with no left fade override and a straight leading edge. */
++private fun scopeWindow(window: FloatArray, x: Float, width: Float): Float {
++    val rightInset = if (window[2] > 0f) window[2] else window[0]
++    val fade = max(window[1], 1f)
++    val t = min(((x - window[0]) / fade).coerceIn(0f, 1f), (((width - x) - rightInset) / fade).coerceIn(0f, 1f))
++    return t * t * (3 - 2 * t)
++}
++
++private fun smoothstep(e0: Float, e1: Float, x: Float): Float {
++    val t = ((x - e0) / (e1 - e0)).coerceIn(0f, 1f)
++    return t * t * (3 - 2 * t)
++}
++
++private fun mix(a: Float, b: Float, t: Float): Float = a + (b - a) * t
++
++private fun saturate(r: Float, g: Float, b: Float, k: Float): FloatArray {
++    val l = r * 0.299f + g * 0.587f + b * 0.114f
++    return floatArrayOf((l + (r - l) * k).coerceIn(0f, 1f), (l + (g - l) * k).coerceIn(0f, 1f), (l + (b - l) * k).coerceIn(0f, 1f))
++}
+diff --git a/feature/voice/src/main/kotlin/ai/opencode/feature/voice/LivingOrbView.kt b/feature/voice/src/main/kotlin/ai/opencode/feature/voice/LivingOrbView.kt
+index c95a7a50..0759435a 100644
+--- a/feature/voice/src/main/kotlin/ai/opencode/feature/voice/LivingOrbView.kt
++++ b/feature/voice/src/main/kotlin/ai/opencode/feature/voice/LivingOrbView.kt
+@@ -8,7 +8,9 @@ import android.graphics.BitmapShader
+ import android.graphics.ColorSpace
+ import android.graphics.RuntimeShader
+ import android.graphics.Shader
++import android.os.Build
+ import android.util.Half
++import androidx.annotation.RequiresApi
+ import androidx.compose.foundation.Canvas
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+@@ -20,9 +22,18 @@ import androidx.compose.runtime.rememberUpdatedState
+ import androidx.compose.runtime.setValue
+ import androidx.compose.runtime.withFrameNanos
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.geometry.CornerRadius
+ import androidx.compose.ui.geometry.Offset
+ import androidx.compose.ui.geometry.Rect
++import androidx.compose.ui.geometry.RoundRect
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.Path
+ import androidx.compose.ui.graphics.ShaderBrush
++import androidx.compose.ui.graphics.drawscope.DrawScope
++import androidx.compose.ui.graphics.drawscope.Stroke
++import androidx.compose.ui.graphics.drawscope.clipPath
++import androidx.compose.ui.graphics.drawscope.clipRect
+ import androidx.compose.ui.layout.onSizeChanged
+ import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.semantics.clearAndSetSemantics
+@@ -96,7 +107,8 @@ data class LivingOrbBloom(
+ /**
+  * The call's voice orb: Wisp's glass lens and phosphor dots ([WispOrbSim], [WispOrbShaders]).
+  *
+- * Android: an AGSL [RuntimeShader] drawn by a Compose [Canvas]; a `withFrameNanos` loop steps the
++ * Android: an AGSL [RuntimeShader] on API 33+, plain Canvas circles below it, drawn by a Compose
++ * [Canvas]; a `withFrameNanos` loop steps the
+  * plain-object [WispOrbRenderer] only while it shows. Under Reduce Motion it draws once whenever
+  * its inputs change. Wisp's glass looks the same in light and dark.
+  *
+@@ -147,8 +159,7 @@ fun LivingOrbView(config: LivingOrbConfig, modifier: Modifier = Modifier, isHidd
+             .clearAndSetSemantics {},
+     ) {
+         @Suppress("UNUSED_EXPRESSION") frame
+-        val brush = renderer.brush ?: return@Canvas
+-        drawRect(brush)
++        renderer.draw(this)
+     }
+ }
+ 
+@@ -156,10 +167,12 @@ fun LivingOrbView(config: LivingOrbConfig, modifier: Modifier = Modifier, isHidd
+  * Steps [WispOrbSim] at display rate and draws a frame: [WispOrbCells] lights every LED, then
+  * [WispOrbShaders] rasterises the lens. A plain object, one per mounted orb; main thread only.
+  *
+- * Android: the cell kernel runs on the CPU and its cells reach the shader as a half-float bitmap.
++ * Android: the cell kernel runs on the CPU; its cells reach the shader as a half-float bitmap on
++ * API 33+, and are drawn as Canvas circles below it.
+  */
+ class WispOrbRenderer private constructor() {
+-    private val shader = RuntimeShader(WispOrbShaders.wispOrbFragment)
++    private val surface: Surface =
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) ShaderSurface() else CanvasSurface()
+     private val sim = WispOrbSim()
+     private var columns = 0
+     /** Each cell's fast and slow phosphor for both voices, kept between frames. */
+@@ -168,8 +181,6 @@ class WispOrbRenderer private constructor() {
+     private var cells = FloatArray(0)
+     /** The newest steps of both voices' wave history (`WISP_TRACE`). */
+     private val traces = FloatArray(traceCount * 4)
+-    private var bitmap: Bitmap? = null
+-    private var pixels: ByteBuffer? = null
+     private var tool: String? = null
+     private var last: Double? = null
+ 
+@@ -180,9 +191,8 @@ class WispOrbRenderer private constructor() {
+     var tuning = WispOrbTuning()
+     var isStill = false
+ 
+-    /** The shader brush once a frame has been drawn into it. */
+-    var brush: ShaderBrush? = null
+-        private set
++    /** Draws the last published frame; nothing before the first. */
++    fun draw(scope: DrawScope) = surface.draw(scope)
+ 
+     fun resetClock() {
+         last = null
+@@ -190,17 +200,12 @@ class WispOrbRenderer private constructor() {
+ 
+     /** New buffers, every LED dark, only when the lattice changes. */
+     private fun prepare(next: Int) {
+-        if (next == columns && bitmap != null) return
++        if (next == columns && cells.isNotEmpty()) return
+         val count = max(1, next * next)
+         phosphor = FloatArray(count * 4)
+         cells = FloatArray(count * WispOrbCells.floatsPerCell)
+-        val texture = createBitmap(max(1, 2 * next), max(1, next), Bitmap.Config.RGBA_F16, hasAlpha = true, colorSpace = ColorSpace.get(ColorSpace.Named.EXTENDED_SRGB))
+-        bitmap = texture
+-        pixels = ByteBuffer.allocateDirect(max(1, 2 * next) * max(1, next) * 8).order(ByteOrder.nativeOrder())
+-        val input = BitmapShader(texture, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply { filterMode = BitmapShader.FILTER_MODE_NEAREST }
+-        shader.setInputBuffer("cells", input)
++        surface.resize(next)
+         columns = next
+-        brush = null
+     }
+ 
+     /** Steps (or stills) the orb for the frame at [nowSeconds] and uploads it. */
+@@ -240,12 +245,7 @@ class WispOrbRenderer private constructor() {
+             traces[i * 4 + 3] = sim.agentTrace.newestHarmonic(i)
+         }
+         WispOrbCells.evaluate(uniforms.data, phosphor, traces, cells)
+-        upload()
+-        for ((name, slot) in WispOrbShaders.rasterSlots) {
+-            val o = slot * 4
+-            shader.setFloatUniform(name, uniforms.data[o], uniforms.data[o + 1], uniforms.data[o + 2], uniforms.data[o + 3])
+-        }
+-        if (brush == null) brush = ShaderBrush(shader)
++        surface.publish(uniforms.data, cells, columns)
+         return true
+     }
+ 
+@@ -281,27 +281,213 @@ class WispOrbRenderer private constructor() {
+         return levels
+     }
+ 
+-    // The texture holds raw half-float bits (`Half.toHalf` → `putShort`), read by the shader as data:
+-    // pixel 2i is (dot radius, dot alpha, halo alpha, 1), pixel 2i + 1 the colour.
+-    @SuppressLint("HalfFloat")
+-    private fun upload() {
+-        val buffer = pixels ?: return
+-        val texture = bitmap ?: return
+-        buffer.clear()
+-        val one = Half.toHalf(1f)
+-        for (n in 0 until columns * columns) {
+-            val c = n * WispOrbCells.floatsPerCell
+-            buffer.putShort(Half.toHalf(cells[c]))
+-            buffer.putShort(Half.toHalf(cells[c + 2]))
+-            buffer.putShort(Half.toHalf(cells[c + 3]))
+-            buffer.putShort(one)
+-            buffer.putShort(Half.toHalf(cells[c + 4]))
+-            buffer.putShort(Half.toHalf(cells[c + 5]))
+-            buffer.putShort(Half.toHalf(cells[c + 6]))
+-            buffer.putShort(one)
++    private interface Surface {
++        /** A new lattice of [columns] × [columns] LEDs. */
++        fun resize(columns: Int)
++        fun publish(uniforms: FloatArray, cells: FloatArray, columns: Int)
++        fun draw(scope: DrawScope)
++    }
++
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
++    private class ShaderSurface : Surface {
++        private val shader = RuntimeShader(WispOrbShaders.wispOrbFragment)
++        private var bitmap: Bitmap? = null
++        private var pixels: ByteBuffer? = null
++        private var brush: ShaderBrush? = null
++
++        override fun resize(columns: Int) {
++            val texture = createBitmap(max(1, 2 * columns), max(1, columns), Bitmap.Config.RGBA_F16, hasAlpha = true, colorSpace = ColorSpace.get(ColorSpace.Named.EXTENDED_SRGB))
++            bitmap = texture
++            pixels = ByteBuffer.allocateDirect(max(1, 2 * columns) * max(1, columns) * 8).order(ByteOrder.nativeOrder())
++            val input = BitmapShader(texture, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply { filterMode = BitmapShader.FILTER_MODE_NEAREST }
++            shader.setInputBuffer("cells", input)
++            brush = null
++        }
++
++        override fun publish(uniforms: FloatArray, cells: FloatArray, columns: Int) {
++            upload(cells, columns)
++            for ((name, slot) in WispOrbShaders.rasterSlots) {
++                val o = slot * 4
++                shader.setFloatUniform(name, uniforms[o], uniforms[o + 1], uniforms[o + 2], uniforms[o + 3])
++            }
++            if (brush == null) brush = ShaderBrush(shader)
++        }
++
++        override fun draw(scope: DrawScope) {
++            brush?.let { scope.drawRect(it) }
++        }
++
++        // The texture holds raw half-float bits (`Half.toHalf` → `putShort`), read by the shader as data:
++        // pixel 2i is (dot radius, dot alpha, halo alpha, 1), pixel 2i + 1 the colour.
++        @SuppressLint("HalfFloat")
++        private fun upload(cells: FloatArray, columns: Int) {
++            val buffer = pixels ?: return
++            val texture = bitmap ?: return
++            buffer.clear()
++            val one = Half.toHalf(1f)
++            for (n in 0 until columns * columns) {
++                val c = n * WispOrbCells.floatsPerCell
++                buffer.putShort(Half.toHalf(cells[c]))
++                buffer.putShort(Half.toHalf(cells[c + 2]))
++                buffer.putShort(Half.toHalf(cells[c + 3]))
++                buffer.putShort(one)
++                buffer.putShort(Half.toHalf(cells[c + 4]))
++                buffer.putShort(Half.toHalf(cells[c + 5]))
++                buffer.putShort(Half.toHalf(cells[c + 6]))
++                buffer.putShort(one)
++            }
++            buffer.rewind()
++            texture.copyPixelsFromBuffer(buffer)
++        }
++    }
++
++    /** [WispOrbShaders]' shadow, plate, glow, LEDs, rim and mute ring as Canvas shapes, without the Fresnel band and dither. */
++    private class CanvasSurface : Surface {
++        private val uniforms = FloatArray(WispOrbUniforms.count * 4)
++        private var cells = FloatArray(0)
++        private var columns = 0
++        private var hasFrame = false
++        private val lens = Path()
++        private val glass = Path()
++
++        override fun resize(columns: Int) = Unit
++
++        override fun publish(uniforms: FloatArray, cells: FloatArray, columns: Int) {
++            uniforms.copyInto(this.uniforms)
++            this.cells = cells
++            this.columns = columns
++            hasFrame = true
++        }
++
++        private fun u(slot: Int, k: Int) = uniforms[slot * 4 + k]
++
++        private fun colour(slot: Int) = rgb(u(slot, 0), u(slot, 1), u(slot, 2))
++
++        override fun draw(scope: DrawScope) {
++            if (!hasFrame) return
++            val corner = u(WispOrbUniforms.clipShape, 0)
++            val bottom = u(WispOrbUniforms.clipShape, 2) - 0.5f * u(WispOrbUniforms.clipShape, 3)
++            scope.clipRect(bottom = min(bottom, scope.size.height)) {
++                if (corner >= 0f) {
++                    glass.reset()
++                    glass.addRoundRect(
++                        RoundRect(
++                            Rect(u(WispOrbUniforms.clipRect, 0), u(WispOrbUniforms.clipRect, 1), u(WispOrbUniforms.clipRect, 2), u(WispOrbUniforms.clipRect, 3)),
++                            CornerRadius(corner),
++                        ),
++                    )
++                    clipPath(glass) { drawOrb(this) }
++                } else {
++                    drawOrb(this)
++                }
++            }
++        }
++
++        private fun drawOrb(scope: DrawScope) {
++            val ppp = u(WispOrbUniforms.view, 2)
++            val centre = Offset(u(WispOrbUniforms.view, 0), u(WispOrbUniforms.view, 1))
++            val radius = u(WispOrbUniforms.grid, 2) * ppp
++            val confirm = u(WispOrbUniforms.mixB, 0)
++            val muted = u(WispOrbUniforms.mixB, 1)
++            val tintBase = colour(WispOrbUniforms.tintBase)
++            val tintCore = colour(WispOrbUniforms.tintCore)
++
++            val shadowCentre = Offset(centre.x, centre.y + u(WispOrbUniforms.glow, 3) * ppp)
++            val shadowRadius = radius + WISP_BLEED * ppp
++            scope.drawCircle(
++                Brush.radialGradient(
++                    0f to Color.Black.copy(alpha = 0.42f),
++                    max(0f, radius - 14.4f * ppp) / shadowRadius to Color.Black.copy(alpha = 0.42f),
++                    radius / shadowRadius to Color.Black.copy(alpha = 0.21f),
++                    1f to Color.Transparent,
++                    center = shadowCentre,
++                    radius = shadowRadius,
++                ),
++                radius = shadowRadius,
++                center = shadowCentre,
++            )
++
++            val plate = mixColour(mixColour(PLATE, PLATE_CONFIRM, confirm * 0.65f), MUTED_PLATE, muted)
++            scope.drawCircle(plate, radius = radius, center = centre, alpha = 0.94f)
++
++            lens.reset()
++            lens.addOval(Rect(centre, radius))
++            scope.clipPath(lens) {
++                val glowStrength = u(WispOrbUniforms.glow, 0)
++                val glowReach = u(WispOrbUniforms.glow, 1) * ppp
++                if (glowStrength > 0.004f && glowReach > 0f) {
++                    val mid = mixColour(tintBase, tintCore, 0.5f)
++                    drawCircle(
++                        Brush.radialGradient(
++                            0f to mid.copy(alpha = glowStrength),
++                            0.5f to mixColour(mid, tintBase, 0.5f).copy(alpha = glowStrength * 0.25f),
++                            1f to tintBase.copy(alpha = 0f),
++                            center = centre,
++                            radius = glowReach,
++                        ),
++                        radius = glowReach,
++                        center = centre,
++                    )
++                }
++                drawCells(this, centre, ppp)
++            }
++
++            val live = 1f - muted
++            if (live > 1e-3f) {
++                val left = mixColour(tintBase, USER_BASE, 0.75f * u(WispOrbUniforms.rim, 0).coerceIn(0f, 1f))
++                val right = mixColour(tintBase, AGENT_BASE, 0.75f * u(WispOrbUniforms.rim, 1).coerceIn(0f, 1f))
++                scope.drawCircle(
++                    Brush.horizontalGradient(
++                        listOf(mixColour(left, Color.White, 0.4f), mixColour(right, Color.White, 0.4f)),
++                        startX = centre.x - radius,
++                        endX = centre.x + radius,
++                    ),
++                    radius = radius - 0.45f * ppp,
++                    center = centre,
++                    alpha = 0.35f * live,
++                    style = Stroke(width = 0.9f * ppp),
++                )
++            }
++            if (muted > 1e-3f) {
++                scope.drawCircle(MUTED_RIM, radius = radius, center = centre, alpha = 0.55f * muted, style = Stroke(width = 1.5f * ppp))
++            }
++        }
++
++        private fun drawCells(scope: DrawScope, centre: Offset, ppp: Float) {
++            val pitch = u(WispOrbUniforms.grid, 1) * ppp
++            val off = (columns - 1) * 0.5f
++            for (j in 0 until columns) {
++                val y = centre.y + (j - off) * pitch
++                for (i in 0 until columns) {
++                    val c = (j * columns + i) * WispOrbCells.floatsPerCell
++                    val dotA = cells[c + 2]
++                    if (dotA <= 0f) continue
++                    val dotR = cells[c] * ppp
++                    val haloA = cells[c + 3]
++                    val colour = rgb(cells[c + 4], cells[c + 5], cells[c + 6])
++                    val at = Offset(centre.x + (i - off) * pitch, y)
++                    if (haloA > 0f) scope.drawCircle(colour, radius = 2 * dotR, center = at, alpha = haloA.coerceAtMost(1f))
++                    scope.drawCircle(colour, radius = dotR, center = at, alpha = dotA.coerceAtMost(1f))
++                }
++            }
++        }
++
++        private companion object {
++            const val WISP_BLEED = 10f
++            val PLATE = Color(15f / 255, 16f / 255, 20f / 255)
++            val PLATE_CONFIRM = Color(44f / 255, 16f / 255, 18f / 255)
++            val MUTED_PLATE = Color(26f / 255, 14f / 255, 16f / 255)
++            val MUTED_RIM = Color(248f / 255, 113f / 255, 113f / 255)
++            val USER_BASE = Color(0.60f, 0.90f, 0.98f)
++            val AGENT_BASE = Color(0.44f, 0.91f, 0.68f)
++
++            fun rgb(r: Float, g: Float, b: Float) = Color(r.coerceIn(0f, 1f), g.coerceIn(0f, 1f), b.coerceIn(0f, 1f))
++
++            fun mixColour(a: Color, b: Color, t: Float): Color {
++                val k = t.coerceIn(0f, 1f)
++                return Color(a.red + (b.red - a.red) * k, a.green + (b.green - a.green) * k, a.blue + (b.blue - a.blue) * k, a.alpha + (b.alpha - a.alpha) * k)
++            }
+         }
+-        buffer.rewind()
+-        texture.copyPixelsFromBuffer(buffer)
+     }
+ 
+     companion object {
+diff --git a/feature/voice/src/main/kotlin/ai/opencode/feature/voice/VoiceHapticEngine.kt b/feature/voice/src/main/kotlin/ai/opencode/feature/voice/VoiceHapticEngine.kt
+index 5e7e2ebe..71fd1618 100644
+--- a/feature/voice/src/main/kotlin/ai/opencode/feature/voice/VoiceHapticEngine.kt
++++ b/feature/voice/src/main/kotlin/ai/opencode/feature/voice/VoiceHapticEngine.kt
+@@ -3,11 +3,14 @@ package ai.opencode.feature.voice
+ import ai.opencode.core.dependencies.*
+ import ai.opencode.core.log.AppLog
+ import android.content.Context
++import android.media.AudioAttributes
++import android.os.Build
+ import android.os.VibrationAttributes
+ import android.os.VibrationEffect
+ import android.os.Vibrator
+ import android.os.VibratorManager
+ import android.provider.Settings
++import androidx.annotation.RequiresApi
+ import androidx.lifecycle.DefaultLifecycleObserver
+ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.LifecycleOwner
+@@ -73,8 +76,16 @@ class VoiceHapticEngine(private val context: Context, private val clock: Clock =
+         }
+         if (amplitudes.all { it == 0 }) { vibrator.cancel(); return }
+         val (timings, levels) = waveformSteps(amplitudes)
+-        vibrator.vibrate(VibrationEffect.createWaveform(timings, levels, -1),
+-            VibrationAttributes.Builder().setUsage(VibrationAttributes.USAGE_TOUCH).build())
++        val effect = VibrationEffect.createWaveform(timings, levels, -1)
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) vibrateTouch(effect) else vibrateTouchLegacy(effect)
++    }
++    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
++    private fun vibrateTouch(effect: VibrationEffect) {
++        vibrator.vibrate(effect, VibrationAttributes.Builder().setUsage(VibrationAttributes.USAGE_TOUCH).build())
++    }
++    @Suppress("DEPRECATION")
++    private fun vibrateTouchLegacy(effect: VibrationEffect) {
++        vibrator.vibrate(effect, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION).build())
+     }
+     override fun cancel(kind: Kind) = synchronized(lock) {
+         val now = clock.now()
+-- 
+2.56.1
+

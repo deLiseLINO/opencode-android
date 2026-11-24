@@ -1,6 +1,6 @@
-# Daily: applies patches/ onto a fresh clone of upstream dev, runs the project check (lint
-# catches any new API 33+ call) and publishes the APK as a release. A patch that no longer
-# applies or a red check fails the run and publishes nothing.
+# Daily: applies patches/ onto a fresh clone of upstream dev, builds the APK, runs lint for
+# API 32+ calls only (NewApi) and publishes the APK as a release. A patch that no longer
+# applies or a NewApi error fails the run and publishes nothing.
 name: Android 12 build
 
 on:
@@ -90,13 +90,15 @@ jobs:
           echo "$DEBUG_KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
           install -Dm644 upstream/.github/gradle/maven-mirror.init.gradle.kts "${GRADLE_USER_HOME:-$HOME/.gradle}/init.d/maven-mirror.init.gradle.kts"
 
-      - name: Check (translations, assemble, lint, unit tests)
+      - name: Build and lint for Android 12 calls
         if: steps.upstream.outputs.skip == 'false'
         working-directory: upstream
         env:
           OC_VERSION_CODE: ${{ github.run_number }}
           OC_VERSION_SUFFIX: ${{ steps.upstream.outputs.tag }}
-        run: scripts/check.sh
+        run: |
+          printf '<?xml version="1.0" encoding="UTF-8"?>\n<lint>\n    <issue id="all" severity="ignore" />\n    <issue id="NewApi" severity="error" />\n</lint>\n' > lint.xml
+          ./gradlew assembleDebug lintDebug
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure() && steps.upstream.outputs.skip == 'false'

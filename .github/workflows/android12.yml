@@ -86,8 +86,10 @@ jobs:
         env:
           DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
         run: |
-          mkdir -p ~/.android
-          echo "$DEBUG_KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+          home="$RUNNER_TEMP/android-user-home"
+          mkdir -p "$home"
+          echo "$DEBUG_KEYSTORE_B64" | base64 -d > "$home/debug.keystore"
+          echo "ANDROID_USER_HOME=$home" >> "$GITHUB_ENV"
           install -Dm644 upstream/.github/gradle/maven-mirror.init.gradle.kts "${GRADLE_USER_HOME:-$HOME/.gradle}/init.d/maven-mirror.init.gradle.kts"
 
       - name: Build and lint for Android 12 calls
@@ -116,6 +118,11 @@ jobs:
           UPSTREAM: ${{ steps.upstream.outputs.sha }}
         run: |
           cp upstream/app/build/outputs/apk/debug/app-debug.apk opencode-android12.apk
+          signer=$("$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs opencode-android12.apk | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)
+          if [ "$signer" != "c2da67dad239104fde8c26ae1c76c59734b07c2b1ee0af907c54ef681f006e61" ]; then
+            echo "::error::APK is signed with $signer, not the Android 12 key"
+            exit 1
+          fi
           gh release delete "$TAG" --yes --cleanup-tag > /dev/null 2>&1 || true
           gh release create "$TAG" opencode-android12.apk --latest --target "$GITHUB_SHA" \
             --title "Android 12 · upstream ${UPSTREAM::7}" \
